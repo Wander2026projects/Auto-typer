@@ -894,7 +894,7 @@
     .panel {
       position: fixed; z-index: 2147483000; width: ${PANEL_WIDTH}px; max-height: calc(100vh - 24px);
       display: flex; flex-direction: column; background: #fff; color: var(--text);
-      border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 12px 36px rgba(20, 22, 40, .22);
+      border: 2px solid #007aff; border-radius: 16px; box-shadow: 0 12px 36px rgba(20, 22, 40, .22);
       font-size: 14px; line-height: 1.4; overflow: hidden;
     }
     .header {
