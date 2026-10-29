@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Typer voor Google Docs
 // @namespace    https://github.com/Wander2026projects/Auto-typer
-// @version      1.1.0
+// @version      1.2.0
 // @description  Typt geplakte tekst letter voor letter in Google Docs, met instelbare snelheid (woorden per minuut), menselijke variatie, pauzes en tikfouten. Met Verbeter-typer: past alleen de veranderde woorden aan.
 // @author       Wander2026projects
 // @match        https://docs.google.com/document/*
@@ -14,8 +14,11 @@
 (function () {
   'use strict';
 
-  if (window.__autoTyperLoaded) return;
-  window.__autoTyperLoaded = true;
+  // Maar één paneel, ook als het script twee keer wordt geladen.
+  // Het attribuut op de pagina wordt gedeeld tussen losse userscript-omgevingen.
+  if (window.__autoTyperLoaded || document.getElementById('auto-typer-host') ||
+      (document.documentElement && document.documentElement.hasAttribute('data-auto-typer'))) return;
+  if (document.documentElement) document.documentElement.setAttribute('data-auto-typer', '1');
 
   // ---------------------------------------------------------------------------
   // Instellingen (worden onthouden in Safari)
@@ -44,9 +47,16 @@
 
   const settings = loadSettings();
 
+  // Versie 2.0.3 bewaarde alles onder ".v2"; dat nemen we over als er nog niets onder ".v1" staat.
+  function readStored(key) {
+    return localStorage.getItem(key) || localStorage.getItem(key.replace(/\.v1$/, '.v2'));
+  }
+
   function loadSettings() {
     try {
-      return Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'));
+      const saved = JSON.parse(readStored(SETTINGS_KEY) || '{}');
+      delete saved.method; // 2.0.3 zette dit vast op 'input'; standaard weer automatisch
+      return Object.assign({}, DEFAULTS, saved);
     } catch (e) {
       return Object.assign({}, DEFAULTS);
     }
@@ -60,7 +70,7 @@
 
   function loadText(key) {
     try {
-      return localStorage.getItem(key) || '';
+      return readStored(key) || '';
     } catch (e) {
       return '';
     }
@@ -1392,5 +1402,27 @@
     if (document.visibilityState === 'visible' && run.active && !run.paused) keepScreenOn(true);
   });
 
-  buildUI();
+  // Opstarten; als Safari of Google Docs nog niet klaar is, probeert hij het opnieuw.
+  function init(attempt) {
+    if (window.__autoTyperLoaded || document.getElementById('auto-typer-host')) return;
+    if (!document.documentElement || !document.body) {
+      if (attempt < 30) setTimeout(() => init(attempt + 1), 300);
+      return;
+    }
+    try {
+      buildUI();
+      window.__autoTyperLoaded = true;
+    } catch (error) {
+      const host = document.getElementById('auto-typer-host');
+      if (host) host.remove();
+      console.error('[Auto Typer] Paneel kon niet starten, nieuwe poging volgt.', error);
+      if (attempt < 10) setTimeout(() => init(attempt + 1), 500);
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => init(0), { once: true });
+  } else {
+    init(0);
+  }
 })();
