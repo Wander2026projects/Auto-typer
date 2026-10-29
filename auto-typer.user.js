@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Auto Typer voor Google Docs
 // @namespace    https://github.com/Wander2026projects/Auto-typer
-// @version      1.2.0
-// @description  Typt geplakte tekst letter voor letter in Google Docs, met instelbare snelheid (woorden per minuut), menselijke variatie, pauzes en tikfouten. Met Verbeter-typer: past alleen de veranderde woorden aan.
+// @version      1.3.0
+// @description  Typt geplakte tekst letter voor letter in Google Docs, met instelbare snelheid (woorden per minuut), menselijke variatie, natuurlijk ritme, pauzes, tikfouten, zinnen herschrijven en typen in stukjes. Met Verbeter-typer: past alleen de veranderde woorden aan.
 // @author       Wander2026projects
 // @match        https://docs.google.com/document/*
 // @run-at       document-idle
@@ -34,8 +34,14 @@
     variation: 50,        // menselijke variatie in %
     sentencePause: 0.6,   // seconden extra na . ! ?
     paragraphPause: 1.5,  // seconden extra na een nieuwe alinea
+    rhythm: true,         // natuurlijk ritme: bekende woorden sneller, hoofdletters en cijfers langzamer
     typoRate: 2,          // tikfouten per 100 woorden
-    readPause: 2,         // seconden "lezen" tussen twee wijzigingen (Verbeter-typer)
+    rewriteOn: false,     // Zinnen herschrijven aan/uit
+    rewriteRate: 10,      // % van de zinnen dat eerst als kladversie komt
+    rewriteStyle: 'mix',  // 'mix' | 'sentence' (hele zin opnieuw) | 'diff' (alleen het verschil)
+    burstOn: false,       // Snel typen in stukjes aan/uit
+    burstPause: 1,        // seconden nadenken tussen twee stukjes
+    readPause: 2,         // seconden "lezen" voor een wijziging (Verbeter-typer en Zinnen herschrijven)
     countdown: 3,         // seconden aftellen voor het typen begint
     method: 'auto',       // 'auto' | 'keys' | 'input'
     tab: 'type',          // 'type' = Auto typer, 'improve' = Verbeter-typer
@@ -248,20 +254,24 @@
     }
   }
 
-  // Cursor een aantal tekens naar rechts, in kleine stapjes.
-  async function moveRight(count, onStep) {
-    let left = count;
+  // Cursor een aantal tekens naar rechts (of naar links als het getal negatief is), in kleine stapjes.
+  async function moveCaret(count) {
+    const [key, keyCode] = count < 0 ? ['ArrowLeft', 37] : ['ArrowRight', 39];
+    let left = Math.abs(count);
     while (left > 0) {
       const batch = Math.min(left, ARROWS_PER_STEP);
-      for (let k = 0; k < batch; k++) pressSpecialKey('ArrowRight', 39);
+      for (let k = 0; k < batch; k++) pressSpecialKey(key, keyCode);
       left -= batch;
-      if (onStep) onStep(count - left);
       await wait(ARROW_STEP_MS);
     }
   }
 
   const ARROWS_PER_STEP = 6;
   const ARROW_STEP_MS = 20;
+
+  function arrowTime(count) {
+    return Math.ceil(Math.abs(count) / ARROWS_PER_STEP) * ARROW_STEP_MS;
+  }
 
   // ---------------------------------------------------------------------------
   // Snelheid, pauzes en tikfouten
@@ -271,6 +281,16 @@
   const CLAUSE_END = new Set([',', ';', ':']);
   const CLAUSE_PAUSE_FACTOR = 0.35;
   const THINK_CHANCE = 0.03; // kans op een korte denkpauze voor een woord (bij 100% variatie)
+  const WORD_RE = /[\p{L}\p{N}]/u;
+  const WARM_UP_CHARS = 150;      // natuurlijk ritme: de eerste tekens gaan wat langzamer
+  const MIN_BURST_FACTOR = 0.35;  // typen in stukjes: hooguit ongeveer 3× zo snel als je ingestelde snelheid
+
+  // Woorden die je zo vaak typt dat ze vanzelf gaan.
+  const COMMON_WORDS = new Set((
+    'de het een en van in is op te dat die met voor zijn niet aan er om ook als bij of maar nog dan wat ' +
+    'ik je jij we wij ze zij hij u was had heeft wordt kan naar uit door zo al wel geen meer veel nu dit deze ' +
+    'the a an and of to it for on with as at by be are this not or but from have has you they he she my so if do no'
+  ).split(' '));
 
   // Toetsen die naast elkaar liggen op een QWERTY-toetsenbord.
   const NEIGHBORS = {
@@ -318,12 +338,102 @@
     return chars[i - 1] === ' ' && chars[i] !== ' ';
   }
 
-  function delayBefore(chars, i) {
+  // Natuurlijk ritme: een tempofactor per teken. Gemiddeld 1, dus je ingestelde snelheid klopt nog steeds.
+  function rhythmFactors(chars, warmUp) {
+    const n = chars.length;
+    const f = new Float64Array(n).fill(1);
+    let i = 0;
+    while (i < n) {
+      const ch = chars[i];
+      if (!WORD_RE.test(ch)) {
+        if (ch === ' ') f[i] = 0.9;
+        else if (ch === '.' || ch === ',') f[i] = 1.05;
+        else if (ch !== '\n' && ch !== '\t') f[i] = 1.3; // haakjes, aanhalingstekens, streepjes…
+        i++;
+        continue;
+      }
+      let j = i;
+      while (j < n && WORD_RE.test(chars[j])) j++;
+      const word = chars.slice(i, j).join('').toLowerCase();
+      const wordPace = COMMON_WORDS.has(word) ? 0.8 : word.length >= 8 ? 1.12 : word.length <= 3 ? 0.9 : 1;
+      for (let k = i; k < j; k++) {
+        let x = wordPace;
+        if (k === i) x *= 1.25; // aan het begin van een woord even op gang komen
+        if (k > i && chars[k].toLowerCase() === chars[k - 1].toLowerCase()) x *= 0.75; // dubbele letter
+        if (chars[k] !== chars[k].toLowerCase()) x *= 1.35; // hoofdletter (Shift)
+        else if (/\p{N}/u.test(chars[k])) x *= 1.4;         // cijfer
+        f[k] = x;
+      }
+      i = j;
+    }
+    if (warmUp) {
+      for (let k = 0; k < Math.min(n, WARM_UP_CHARS); k++) f[k] *= 1 + 0.4 * (1 - k / WARM_UP_CHARS);
+    }
+    // Gemiddeld op 1 zetten. Het eerste teken telt niet mee: daar wacht hij niet voor.
+    let sum = 0;
+    for (let k = 1; k < n; k++) sum += f[k];
+    if (sum > 0) {
+      const mean = sum / (n - 1);
+      for (let k = 0; k < n; k++) f[k] /= mean;
+    }
+    return f;
+  }
+
+  // Aantal woorden in een stukje: 1–4, meestal 2 of 3.
+  function chunkSize() {
+    const r = Math.random();
+    return r < 0.15 ? 1 : r < 0.5 ? 2 : r < 0.85 ? 3 : 4;
+  }
+
+  // Typen in stukjes: de woorden waar een nieuw stukje begint (met een denkpauze ervoor).
+  // Na een zin, komma of alinea begint ook een nieuw stukje, maar daar pauzeert hij al.
+  function chunkPlan(chars) {
+    const chunkStart = new Uint8Array(chars.length);
+    let chunks = 0;
+    let left = chunkSize() - 1;
+    for (let i = 1; i < chars.length; i++) {
+      const prev = chars[i - 1];
+      if (/\s/.test(chars[i]) || !/\s/.test(prev)) continue;
+      if (prev === '\n' || SENTENCE_END.has(chars[i - 2]) || CLAUSE_END.has(chars[i - 2])) {
+        left = chunkSize() - 1;
+      } else if (left > 0) {
+        left--;
+      } else {
+        chunkStart[i] = 1;
+        chunks++;
+        left = chunkSize() - 1;
+      }
+    }
+    return { chunkStart, chunks };
+  }
+
+  // Het tempo voor een reeks tekens: natuurlijk ritme, en (als dat aan staat) de stukjes.
+  function makePace(chars, options) {
+    const opts = options || {};
+    const pace = { rhythm: rhythmFactors(chars, opts.warmUp), chunkStart: null, chunks: 0, count: Math.max(1, chars.length - 1) };
+    if (opts.bursts) Object.assign(pace, chunkPlan(chars));
+    return pace;
+  }
+
+  // In stukjes typt hij sneller, zodat de denkpauzes je gemiddelde snelheid niet omlaag halen.
+  function burstFactor(pace) {
+    if (!pace.chunks) return 1;
+    const typing = charDelay() * pace.count;
+    return Math.max(MIN_BURST_FACTOR, 1 - (pace.chunks * settings.burstPause * 1000) / typing);
+  }
+
+  function paceFactor(pace, i) {
+    return (settings.rhythm ? pace.rhythm[i] : 1) * burstFactor(pace);
+  }
+
+  function delayBefore(chars, i, pace) {
     if (i === 0) return 0;
-    let ms = charDelay() * jitter();
-    const pause = pauseBefore(chars, i);
+    let ms = charDelay() * paceFactor(pace, i) * jitter();
+    const chunk = pace.chunkStart && pace.chunkStart[i];
+    let pause = pauseBefore(chars, i);
+    if (chunk) pause += settings.burstPause * 1000;
     if (pause) ms += spread(pause);
-    if (isWordStart(chars, i) && Math.random() < THINK_CHANCE * (settings.variation / 100)) {
+    if (!chunk && isWordStart(chars, i) && Math.random() < THINK_CHANCE * (settings.variation / 100)) {
       ms += 400 + Math.random() * 1600;
     }
     return ms;
@@ -363,14 +473,17 @@
   }
 
   // Typt een reeks tekens met het ingestelde tempo, pauzes en tikfouten.
-  async function typeSequence(chars, onProgress) {
+  // 'after' draait na elk teken (de Auto typer herschrijft daar een zin).
+  async function typeSequence(chars, pace, onProgress, after) {
+    if (!pace) pace = makePace(chars);
     for (let i = 0; i < chars.length; i++) {
-      await wait(delayBefore(chars, i));
+      await wait(delayBefore(chars, i, pace));
       if (i > 0 && canTypo(chars[i]) && Math.random() < typoChance()) {
         await makeTypo(chars, i);
       }
       await typeChar(chars[i]);
       if (onProgress) onProgress(i + 1);
+      if (after) await after(i + 1);
     }
   }
 
@@ -382,18 +495,23 @@
   }
 
   // Verwachte tijd per teken, voor de schatting "nog ongeveer ...".
-  function expectedCost(chars, i) {
+  function expectedCost(chars, i, pace) {
     const base = charDelay();
-    let ms = i === 0 ? 0 : base + pauseBefore(chars, i);
-    if (isWordStart(chars, i)) ms += THINK_CHANCE * (settings.variation / 100) * 1200;
+    const chunk = pace.chunkStart && pace.chunkStart[i];
+    let ms = i === 0 ? 0 : base * paceFactor(pace, i) + pauseBefore(chars, i);
+    if (chunk) ms += settings.burstPause * 1000;
+    else if (isWordStart(chars, i)) ms += THINK_CHANCE * (settings.variation / 100) * 1200;
     if (canTypo(chars[i])) ms += typoChance() * (base * 3.6 + 1000);
     return ms;
   }
 
-  function buildEstimate(chars) {
+  // 'extra(j)': tijd voor iets dat hij doet voordat hij teken j typt (zoals een zin herschrijven).
+  function buildEstimate(chars, pace, extra) {
+    if (!pace) pace = makePace(chars);
     const remaining = new Float64Array(chars.length + 1);
+    if (extra) remaining[chars.length] = extra(chars.length);
     for (let j = chars.length - 1; j >= 0; j--) {
-      remaining[j] = remaining[j + 1] + expectedCost(chars, j);
+      remaining[j] = remaining[j + 1] + expectedCost(chars, j, pace) + (extra ? extra(j) : 0);
     }
     return remaining;
   }
@@ -554,6 +672,13 @@
       note = 'Lege regels tussen alinea\'s in de nieuwe tekst worden genegeerd, want je document heeft die niet.';
     }
 
+    const { edits } = planEdits(oldText, newText);
+    return { oldText, newText, edits, note };
+  }
+
+  // Wijzigingen met cursorstappen, vanaf het begin van de oude tekst.
+  // 'caret' is waar de cursor na de laatste wijziging staat (in de nieuwe tekst).
+  function planEdits(oldText, newText) {
     const edits = buildEdits(diffTexts(oldText, newText));
     let caret = 0;
     let offset = 0;
@@ -565,11 +690,11 @@
       caret = target - e.delLen + e.insChars.length;
       offset += e.insChars.length - e.delLen;
     });
-    return { oldText, newText, edits, note };
+    return { edits, caret };
   }
 
   function editCost(e, k) {
-    let ms = Math.ceil(e.move / ARROWS_PER_STEP) * ARROW_STEP_MS;
+    let ms = arrowTime(e.move);
     if (k > 0) ms += settings.readPause * 1000;
     ms += e.delLen * charDelay() * 0.6;
     if (e.insChars.length) ms += charDelay() + buildEstimate(e.insChars)[0];
@@ -580,6 +705,284 @@
     const remaining = new Float64Array(edits.length + 1);
     for (let k = edits.length - 1; k >= 0; k--) remaining[k] = remaining[k + 1] + editCost(edits[k], k);
     return remaining;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Zinnen herschrijven: eerst een kladversie, een paar zinnen later terug om hem te verbeteren
+  // ---------------------------------------------------------------------------
+
+  const MAX_BACK = 3;         // hooguit zoveel zinnen doortypen voordat hij teruggaat
+  const MIN_DRAFT_WORDS = 4;  // kortere zinnen herschrijft hij niet
+  const CLOSERS = new Set([')', ']', '"', '\'', '”', '’', '»']);
+  // Hier kan het tellen van de cursorstappen misgaan: emoji, of iets dat Google Docs zelf vervangt (zoals (c) → ©).
+  const RISKY_RE = /[\p{M}‍️\u{10000}-\u{10FFFF}]|\((?:c|r|tm)\)|->|<-|=>|<=|>=|!=|--|\d\/\d|\.\.\.|[:;]-?[()DP]/iu;
+
+  const LANG_HINTS = {
+    nl: new Set('de het een en van ik je niet dat zijn met voor op maar ook'.split(' ')),
+    en: new Set('the and of to that it for with on but not you this are was'.split(' ')),
+  };
+
+  // Een extra woordje dat er bij het verbeteren weer uit gaat.
+  const FILLERS = {
+    nl: ['eigenlijk', 'gewoon', 'echt', 'ook', 'wel', 'best', 'zeker', 'vooral'],
+    en: ['really', 'just', 'actually', 'also', 'quite', 'basically'],
+  };
+
+  // Werkwoorden waar zo'n woordje achter kan: "Het was echt groter." / "It was really cold."
+  const FILLER_AFTER = {
+    nl: new Set(('is was ben bent zijn waren had heb hebt heeft hadden wil wilde kan kon moet moest ga gaat ging gingen ' +
+      'vind vond denk dacht wordt werd zou zal mag mocht kwam kwamen').split(' ')),
+    en: new Set('is was are were am have has had will would can could should must do did'.split(' ')),
+  };
+
+  // Woord in je tekst → het woord dat hij eerst in de kladversie typt.
+  const SYNONYMS = {
+    nl: new Map(Object.entries({
+      echter: 'toch', daarom: 'dus', dus: 'daarom', omdat: 'want', want: 'omdat', bovendien: 'ook',
+      erg: 'heel', heel: 'erg', zeer: 'heel', moeilijk: 'lastig', lastig: 'moeilijk', snel: 'vlug',
+      misschien: 'wellicht', wellicht: 'misschien', meestal: 'vaak', altijd: 'steeds', eigenlijk: 'feitelijk',
+      beginnen: 'starten', begint: 'start', begon: 'startte', mooi: 'leuk', leuk: 'mooi', groot: 'flink',
+      krijgen: 'ontvangen', krijgt: 'ontvangt', kreeg: 'ontving', denk: 'vind', vind: 'denk', bijna: 'haast',
+      direct: 'meteen', meteen: 'direct', helemaal: 'totaal', alleen: 'enkel', enkel: 'alleen', zodat: 'waardoor',
+    })),
+    en: new Map(Object.entries({
+      however: 'but', therefore: 'so', because: 'since', very: 'really',
+      big: 'large', large: 'big', often: 'usually', usually: 'often', difficult: 'hard',
+      begin: 'start', start: 'begin', maybe: 'perhaps', perhaps: 'maybe', quickly: 'fast',
+      almost: 'nearly', nearly: 'almost',
+    })),
+  };
+
+  function detectLanguage(text) {
+    let nl = 0;
+    let en = 0;
+    (text.toLowerCase().match(/\p{L}+/gu) || []).slice(0, 2000).forEach((w) => {
+      if (LANG_HINTS.nl.has(w)) nl++;
+      if (LANG_HINTS.en.has(w)) en++;
+    });
+    return en > nl ? 'en' : 'nl';
+  }
+
+  // Zinnen als {start, end, para}: van de eerste letter tot en met de punt (posities in tekens).
+  function findSentences(chars) {
+    const sentences = [];
+    let para = 0;
+    let i = 0;
+    while (i < chars.length) {
+      if (chars[i] === '\n') {
+        para++;
+        i++;
+        continue;
+      }
+      if (!WORD_RE.test(chars[i])) {
+        i++;
+        continue;
+      }
+      const start = i;
+      let end = -1;
+      while (i < chars.length && chars[i] !== '\n') {
+        if (!SENTENCE_END.has(chars[i])) {
+          i++;
+          continue;
+        }
+        let j = i + 1;
+        while (j < chars.length && (SENTENCE_END.has(chars[j]) || CLOSERS.has(chars[j]))) j++;
+        i = j;
+        if (j >= chars.length || /\s/.test(chars[j])) {
+          end = j;
+          break;
+        }
+      }
+      if (end < 0) { // laatste zin van de alinea, zonder punt
+        end = i;
+        while (end > start && /\s/.test(chars[end - 1])) end--;
+      }
+      sentences.push({ start, end, para });
+    }
+    return sentences;
+  }
+
+  const isWord = (t) => t != null && WORD_RE.test(t);
+  const isGap = (t) => t === ' ';
+  const endsClause = (t) => t == null || isGap(t) || SENTENCE_END.has(t) || CLAUSE_END.has(t);
+  // Een gewoon woord met kleine letters (geen naam, getal of afkorting).
+  const isPlainWord = (t) => isWord(t) && /^\p{Ll}+$/u.test(t);
+
+  function wordPositions(tokens) {
+    const list = [];
+    tokens.forEach((t, k) => { if (isWord(t)) list.push(k); });
+    return list;
+  }
+
+  function pickRandom(list) {
+    return list.length ? list[Math.floor(Math.random() * list.length)] : undefined;
+  }
+
+  function matchCase(word, model) {
+    if (model.length > 1 && model === model.toUpperCase()) return word.toUpperCase();
+    if (model[0] !== model[0].toLowerCase()) return word[0].toUpperCase() + word.slice(1);
+    return word;
+  }
+
+  // Een woord vergeten: "Ik ga morgen naar school." → "Ik ga naar school."
+  function dropWord(tokens) {
+    const k = pickRandom(wordPositions(tokens).slice(1)
+      .filter((p) => isPlainWord(tokens[p]) && isGap(tokens[p - 1]) && isGap(tokens[p + 1])));
+    if (k === undefined) return null;
+    const out = tokens.slice();
+    out.splice(k - 1, 2);
+    return out;
+  }
+
+  // Een woordje te veel: "Het was groter dan ik dacht." → "Het was echt groter dan ik dacht."
+  function addFiller(tokens, lang) {
+    const k = pickRandom(wordPositions(tokens).filter((p) => FILLER_AFTER[lang].has(tokens[p].toLowerCase()) &&
+      isGap(tokens[p + 1]) && isPlainWord(tokens[p + 2]) && !FILLERS[lang].includes(tokens[p + 2])));
+    if (k === undefined) return null;
+    const out = tokens.slice();
+    out.splice(k + 2, 0, pickRandom(FILLERS[lang]), ' ');
+    return out;
+  }
+
+  // Eerst een ander woord: "Het was echter te laat." → "Het was maar te laat."
+  function swapSynonym(tokens, lang) {
+    const k = pickRandom(wordPositions(tokens).filter((p) => SYNONYMS[lang].has(tokens[p].toLowerCase())));
+    if (k === undefined) return null;
+    const out = tokens.slice();
+    out[k] = matchCase(SYNONYMS[lang].get(tokens[k].toLowerCase()), tokens[k]);
+    return out;
+  }
+
+  // Twee woorden omgedraaid: "Ik ga morgen naar school." → "Ik ga naar morgen school."
+  function swapWords(tokens) {
+    const k = pickRandom(wordPositions(tokens).slice(1).filter((p) =>
+      isPlainWord(tokens[p]) && isPlainWord(tokens[p + 2]) && tokens[p] !== tokens[p + 2] &&
+      isGap(tokens[p - 1]) && isGap(tokens[p + 1]) && endsClause(tokens[p + 3])));
+    if (k === undefined) return null;
+    const out = tokens.slice();
+    out[k] = tokens[k + 2];
+    out[k + 2] = tokens[k];
+    return out;
+  }
+
+  // Zin nog niet af: "Ik fiets elke dag naar school." → "Ik fiets elke dag."
+  function cutEnd(tokens) {
+    let end = tokens.length;
+    while (end > 0 && !isWord(tokens[end - 1]) && !isGap(tokens[end - 1])) end--;
+    if (!tokens.slice(end).some((t) => SENTENCE_END.has(t))) return null;
+    let from = end;
+    const cut = 1 + Math.floor(Math.random() * 2);
+    for (let c = 0; c < cut && isPlainWord(tokens[from - 1]) && isGap(tokens[from - 2]); c++) from -= 2;
+    if (from === end || wordPositions(tokens.slice(0, from)).length < MIN_DRAFT_WORDS) return null;
+    return tokens.slice(0, from).concat(tokens.slice(end));
+  }
+
+  const DRAFT_CHANGES = [[3, dropWord], [2, addFiller], [3, swapSynonym], [1, swapWords], [2, cutEnd]];
+
+  // Probeert de veranderingen in willekeurige volgorde (de gewone vaker eerst) tot er één lukt.
+  function changeOnce(tokens, lang) {
+    const options = DRAFT_CHANGES.slice();
+    while (options.length) {
+      let r = Math.random() * options.reduce((sum, [weight]) => sum + weight, 0);
+      let k = 0;
+      while (k < options.length - 1 && r >= options[k][0]) r -= options[k++][0];
+      const [, change] = options.splice(k, 1)[0];
+      const out = change(tokens, lang);
+      if (out) return out;
+    }
+    return null;
+  }
+
+  // Kladversie van een zin, of null als de zin zich er niet voor leent.
+  function makeDraft(sentence, lang) {
+    let tokens = tokenize(sentence);
+    if (wordPositions(tokens).length < MIN_DRAFT_WORDS) return null;
+    const changes = Math.random() < 0.3 ? 2 : 1;
+    for (let c = 0; c < changes; c++) tokens = changeOnce(tokens, lang) || tokens;
+    const draft = tokens.join('');
+    return draft === sentence ? null : draft;
+  }
+
+  // Kiest welke zinnen eerst als kladversie komen, en na hoeveel zinnen hij teruggaat.
+  // Hij blijft binnen dezelfde alinea; zo hoeft de cursor nooit over een nieuwe regel of een opsommingsteken.
+  function chooseRewrites(chars) {
+    const sentences = findSentences(chars);
+    const lang = detectLanguage(chars.join(''));
+    const fixes = [];
+    for (let k = 0; k < sentences.length; k++) {
+      const s = sentences[k];
+      let after = 0;
+      while (after < MAX_BACK && k + after + 1 < sentences.length && sentences[k + after + 1].para === s.para) after++;
+      if (!after || Math.random() >= settings.rewriteRate / 100) continue;
+      const back = 1 + Math.floor(Math.random() * after);
+      const last = sentences[k + back];
+      if (RISKY_RE.test(chars.slice(s.start, last.end).join(''))) continue;
+      const final = chars.slice(s.start, s.end);
+      const draft = makeDraft(final.join(''), lang);
+      if (!draft) continue;
+
+      const fix = { start: s.start, end: s.end, gap: last.end - s.end, final, draft: Array.from(draft) };
+      fix.style = settings.rewriteStyle === 'mix' ? (Math.random() < 0.5 ? 'sentence' : 'diff') : settings.rewriteStyle;
+      if (fix.style === 'diff') {
+        const { edits, caret } = planEdits(draft, final.join(''));
+        fix.edits = edits;
+        fix.back = final.length - caret + fix.gap;
+      } else {
+        fix.finalPace = makePace(final);
+        fix.back = fix.gap;
+      }
+      fixes.push(fix);
+      k += back;
+    }
+    return fixes;
+  }
+
+  // Alles wat de Auto typer nodig heeft: wat hij typt (met kladzinnen), waar hij teruggaat, en het tempo.
+  function planTyping(chars) {
+    const fixes = settings.rewriteOn ? chooseRewrites(chars) : [];
+    const stream = [];
+    const copy = (from, to) => { for (let k = from; k < to; k++) stream.push(chars[k]); };
+    let pos = 0;
+    fixes.forEach((fix) => {
+      copy(pos, fix.start);
+      fix.streamStart = stream.length;
+      fix.draft.forEach((ch) => stream.push(ch));
+      fix.streamAt = stream.length + fix.gap; // hier gaat hij terug: na de laatste zin die hij doortypt
+      pos = fix.end;
+    });
+    copy(pos, chars.length);
+    return { stream, fixes, pace: makePace(stream, { warmUp: true, bursts: settings.burstOn }) };
+  }
+
+  // Het plan bewaren we, zodat de tijdschatting in het paneel hoort bij wat hij bij Start echt doet.
+  let typingPlan = null;
+
+  function currentTypingPlan(text) {
+    const key = [text, settings.rewriteOn, settings.rewriteRate, settings.rewriteStyle, settings.burstOn].join('\u0000');
+    if (!typingPlan || typingPlan.key !== key) typingPlan = Object.assign(planTyping(toChars(text)), { key });
+    return typingPlan;
+  }
+
+  function rewriteCost(fix) {
+    let ms = settings.readPause * 1000 + 300 + 450 + arrowTime(fix.back);
+    if (fix.style === 'diff') {
+      ms += arrowTime(fix.gap + fix.draft.length);
+      fix.edits.forEach((e, k) => { ms += (k ? 550 : 0) + editCost(e, 0); });
+    } else {
+      ms += arrowTime(fix.gap) + 350 + fix.draft.length * charDelay() * 0.6 + charDelay() + 550 +
+        buildEstimate(fix.final, fix.finalPace)[0];
+    }
+    return ms;
+  }
+
+  function buildPlanEstimate(plan) {
+    const costs = new Map(plan.fixes.map((fix) => [fix.streamAt, rewriteCost(fix)]));
+    return buildEstimate(plan.stream, plan.pace, (j) => costs.get(j) || 0);
+  }
+
+  function shorten(text) {
+    const words = text.split(/\s+/);
+    return words.length > 6 ? words.slice(0, 6).join(' ') + '…' : text;
   }
 
   // ---------------------------------------------------------------------------
@@ -594,7 +997,8 @@
     paused: false,
     stopRequested: false,
     method: null,
-    chars: [],          // Auto typer: de tekst
+    plan: null,         // Auto typer: wat hij typt en waar hij teruggaat
+    fixIndex: 0,        // Auto typer: de volgende zin die hij herschrijft
     edits: [],          // Verbeter-typer: de wijzigingen
     done: 0,
     total: 0,
@@ -653,7 +1057,8 @@
       paused: false,
       stopRequested: false,
       method: settings.method === 'auto' ? null : settings.method,
-      chars: [],
+      plan: null,
+      fixIndex: 0,
       edits: [],
       done: 0,
       total: 0,
@@ -693,6 +1098,7 @@
     keepScreenOn(false);
     updateControls();
     updateProgress();
+    updateMeta();
   }
 
   function showError(e, stoppedMessage) {
@@ -703,6 +1109,39 @@
     }
   }
 
+  // Eén wijziging: cursor erheen, het oude stuk wissen, het nieuwe stuk typen.
+  async function applyEdit(e) {
+    await moveCaret(e.move);
+    if (e.delLen) {
+      await wait(200 + Math.random() * 300);
+      await deleteChars(e.delLen);
+    }
+    if (e.insChars.length) {
+      await wait(charDelay() * jitter());
+      await typeSequence(e.insChars);
+    }
+  }
+
+  // Terug naar de kladzin, hem verbeteren, en weer verder waar hij was.
+  async function rewriteSentence(fix) {
+    await wait(spread(settings.readPause * 1000) + 300); // even teruglezen
+    if (fix.style === 'diff') {
+      await moveCaret(-(fix.gap + fix.draft.length));
+      for (let k = 0; k < fix.edits.length; k++) {
+        if (k > 0) await wait(300 + Math.random() * 500);
+        await applyEdit(fix.edits[k]);
+      }
+    } else {
+      await moveCaret(-fix.gap);
+      await wait(200 + Math.random() * 300);
+      await deleteChars(fix.draft.length);
+      await wait(charDelay() * jitter() + 300 + Math.random() * 500);
+      await typeSequence(fix.final, fix.finalPace);
+    }
+    await wait(250 + Math.random() * 400);
+    await moveCaret(fix.back);
+  }
+
   async function startTyping() {
     if (run.active) return;
     const text = ui.textarea.value;
@@ -711,21 +1150,34 @@
       return;
     }
 
-    const chars = toChars(text);
-    beginRun('type', { chars: chars, total: chars.length, estimate: buildEstimate(chars) });
+    const plan = currentTypingPlan(text);
+    typingPlan = null; // de volgende keer weer andere zinnen
+    beginRun('type', { plan: plan, total: plan.stream.length, estimate: buildPlanEstimate(plan) });
 
     try {
       await countdown('Tik nu in je document waar de tekst moet komen.');
       setStatus('Bezig met typen…');
-      await typeSequence(chars, (done) => {
+      await typeSequence(plan.stream, plan.pace, (done) => {
         run.done = done;
         updateProgress();
+      }, async (done) => {
+        const fix = plan.fixes[run.fixIndex];
+        if (!fix || fix.streamAt !== done) return;
+        setStatus('Zin verbeteren…');
+        await rewriteSentence(fix);
+        run.fixIndex++;
+        setStatus('Bezig met typen…');
       });
       const words = countWords(text);
+      const rewritten = plan.fixes.length ? ', ' + plural(plan.fixes.length, 'zin', 'zinnen') + ' herschreven' : '';
       setStatus('Klaar! ✓ ' + words + ' ' + (words === 1 ? 'woord' : 'woorden') +
-        ' getypt in ' + formatDuration(activeTime()) + '.', 'ok');
+        ' getypt in ' + formatDuration(activeTime()) + rewritten + '.', 'ok');
     } catch (e) {
-      showError(e, 'Gestopt na ' + run.done.toLocaleString('nl-NL') + ' tekens.');
+      const fix = plan.fixes[run.fixIndex];
+      const draftNote = fix && run.done > fix.streamStart
+        ? ' Let op: de zin "' + shorten(fix.final.join('')) + '" is misschien nog niet verbeterd. Kijk die even na.'
+        : '';
+      showError(e, 'Gestopt na ' + run.done.toLocaleString('nl-NL') + ' tekens.' + draftNote);
     } finally {
       endRun();
     }
@@ -754,15 +1206,7 @@
         const e = plan.edits[k];
         if (k > 0) await wait(spread(settings.readPause * 1000));
         setStatus('Wijziging ' + (k + 1) + ' van ' + plan.edits.length + '…');
-        await moveRight(e.move);
-        if (e.delLen) {
-          await wait(200 + Math.random() * 300);
-          await deleteChars(e.delLen);
-        }
-        if (e.insChars.length) {
-          await wait(charDelay() * jitter());
-          await typeSequence(e.insChars);
-        }
+        await applyEdit(e);
         run.done = k + 1;
         updateProgress();
       }
@@ -780,9 +1224,13 @@
     if (!run.active || run.paused || run.mode === 'test') return;
     run.paused = true;
     run.pausedAt = Date.now();
-    setStatus(run.mode === 'improve'
-      ? 'Gepauzeerd. Tik niet in je document, anders klopt de plek van de volgende wijziging niet. Druk op Verder om door te gaan.'
-      : 'Gepauzeerd. Druk op Verder om door te gaan.');
+    if (run.mode === 'improve') {
+      setStatus('Gepauzeerd. Tik niet in je document, anders klopt de plek van de volgende wijziging niet. Druk op Verder om door te gaan.');
+    } else if (run.plan && run.fixIndex < run.plan.fixes.length) {
+      setStatus('Gepauzeerd. Tik niet in je document, anders gaat het herschrijven van een zin mis. Druk op Verder om door te gaan.');
+    } else {
+      setStatus('Gepauzeerd. Druk op Verder om door te gaan.');
+    }
     keepScreenOn(false);
     updateControls();
   }
@@ -967,6 +1415,32 @@
       font-size: 14px; padding: 0 8px;
     }
     .method button.btn { height: 38px; padding: 0 14px; }
+    .row > select { width: 100%; margin-top: 4px; }
+    .toggles { display: grid; gap: 6px; margin: 0 0 12px; }
+    .switch {
+      position: relative; display: flex; align-items: center; gap: 10px; padding: 8px 10px; cursor: pointer;
+      border: 1px solid var(--line); border-radius: 10px; user-select: none; -webkit-user-select: none;
+    }
+    .switch input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; pointer-events: none; }
+    .track { position: relative; flex: none; width: 40px; height: 24px; border-radius: 99px; background: #cfd3dd; transition: background .15s; }
+    .track::after {
+      content: ""; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%;
+      background: #fff; box-shadow: 0 1px 3px rgba(20, 22, 40, .3); transition: transform .15s;
+    }
+    .switch input:checked + .track { background: var(--accent); }
+    .switch input:checked + .track::after { transform: translateX(16px); }
+    .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .switch input:disabled + .track { opacity: .45; }
+    .switch-text { display: flex; flex-direction: column; min-width: 0; }
+    .switch-title { font-size: 13.5px; font-weight: 600; }
+    .group {
+      margin: 18px 0 0; padding-top: 10px; border-top: 1px dashed var(--line); color: var(--muted);
+      font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+    }
+    .group .hint { text-transform: none; letter-spacing: 0; font-weight: 400; margin-top: 2px; }
+    .profiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 4px; }
+    .profiles button.btn { height: 36px; font-size: 13.5px; }
+    .profiles button.btn.active { border-color: var(--accent); color: var(--accent); background: #eef0ff; }
     .tip { color: var(--muted); font-size: 12px; margin-top: 12px; }
     .bubble {
       position: fixed; z-index: 2147483000; width: ${BUBBLE_SIZE}px; height: ${BUBBLE_SIZE}px; border-radius: 50%;
@@ -1006,6 +1480,16 @@
     return n.toLocaleString('nl-NL') + ' ' + (n === 1 ? one : many);
   }
 
+  // Snelkeuze: een setje instellingen in één keer. 'Gemiddeld' is hetzelfde als de standaard.
+  const PROFILES = [
+    ['Rustig', { wpm: 30, variation: 60, sentencePause: 1.2, paragraphPause: 3, typoRate: 3, burstPause: 1.5, readPause: 3 }],
+    ['Gemiddeld', { wpm: 45, variation: 50, sentencePause: 0.6, paragraphPause: 1.5, typoRate: 2, burstPause: 1, readPause: 2 }],
+    ['Snel', { wpm: 75, variation: 40, sentencePause: 0.3, paragraphPause: 0.8, typoRate: 1.5, burstPause: 0.6, readPause: 1 }],
+  ];
+
+  const sliderRefresh = {};
+  const profileButtons = [];
+
   function sliderRow(label, key, min, max, step, format, hint) {
     const row = el('div', 'row');
     const top = el('div', 'row-top');
@@ -1030,10 +1514,83 @@
       onSettingsChanged();
     });
     show();
+    sliderRefresh[key] = () => {
+      input.value = String(settings[key]);
+      show();
+    };
 
     row.append(top, input);
     if (hint) row.append(el('div', 'hint', hint));
     return row;
+  }
+
+  // Aan/uit-schakelaar; geeft [rij, vinkje] terug.
+  function toggleRow(label, key, hint) {
+    const row = el('label', 'switch');
+    const input = el('input');
+    input.type = 'checkbox';
+    input.checked = !!settings[key];
+    input.addEventListener('change', () => {
+      settings[key] = input.checked;
+      onSettingsChanged();
+    });
+    const text = el('span', 'switch-text');
+    text.append(el('span', 'switch-title', label));
+    if (hint) text.append(el('span', 'hint', hint));
+    row.append(input, el('span', 'track'), text);
+    return [row, input];
+  }
+
+  function selectRow(label, key, options, hint) {
+    const row = el('div', 'row');
+    const top = el('div', 'row-top');
+    const lab = el('label', null, label);
+    lab.htmlFor = 'at-' + key;
+    top.append(lab);
+    const select = el('select');
+    select.id = 'at-' + key;
+    options.forEach(([value, text]) => select.append(new Option(text, value)));
+    select.value = settings[key];
+    select.addEventListener('change', () => {
+      settings[key] = select.value;
+      onSettingsChanged();
+    });
+    row.append(top, select);
+    if (hint) row.append(el('div', 'hint', hint));
+    return row;
+  }
+
+  function groupTitle(title, hint) {
+    const head = el('div', 'group', title);
+    if (hint) head.append(el('div', 'hint', hint));
+    return head;
+  }
+
+  function profileRow() {
+    const row = el('div', 'row');
+    const top = el('div', 'row-top');
+    top.append(el('label', null, 'Snelkeuze'));
+    const list = el('div', 'profiles');
+    PROFILES.forEach(([name, values]) => {
+      const button = el('button', 'btn', name);
+      button.type = 'button';
+      button.addEventListener('click', () => {
+        Object.assign(settings, values);
+        Object.keys(values).forEach((key) => { if (sliderRefresh[key]) sliderRefresh[key](); });
+        onSettingsChanged();
+      });
+      profileButtons.push([button, values]);
+      list.append(button);
+    });
+    row.append(top, list, el('div', 'hint', 'Zet snelheid, variatie, pauzes en tikfouten in één keer. Daarna kun je nog zelf schuiven.'));
+    return row;
+  }
+
+  // Het profiel waar alle instellingen nog precies op staan, lichten we op.
+  function markProfile() {
+    profileButtons.forEach(([button, values]) => {
+      button.classList.toggle('active', Object.keys(values).every((key) => Math.abs(settings[key] - values[key]) < 1e-6));
+    });
   }
 
   function textField(label, key, placeholder, small) {
@@ -1092,7 +1649,13 @@
     const typeSection = el('div');
     const [, textarea] = textField('Tekst', TEXT_KEY, 'Plak hier de tekst die getypt moet worden…');
     const typeMeta = el('div', 'meta');
-    typeSection.append(textarea, typeMeta);
+    const toggles = el('div', 'toggles');
+    const [rewriteRow, rewriteToggle] = toggleRow('Zinnen herschrijven', 'rewriteOn',
+      'Gaat soms 1–3 zinnen terug en verbetert een zin.');
+    const [burstRow, burstToggle] = toggleRow('Snel typen in stukjes', 'burstOn',
+      'Een paar woorden snel, even nadenken, dan weer verder.');
+    toggles.append(rewriteRow, burstRow);
+    typeSection.append(textarea, typeMeta, toggles);
 
     // Verbeter-typer
     const improveSection = el('div');
@@ -1128,19 +1691,39 @@
     });
     details.append(el('summary', null, 'Instellingen'));
 
+    const rhythmRow = el('div', 'row');
+    rhythmRow.append(toggleRow('Natuurlijk ritme', 'rhythm',
+      'Korte, bekende woorden gaan sneller; lange woorden, hoofdletters, cijfers en leestekens langzamer. In het begin warmt hij even op.')[0]);
+
     details.append(
+      profileRow(),
       sliderRow('Snelheid', 'wpm', 10, 300, 1, (v) => v + ' woorden per minuut',
         'Gemiddeld typt iemand 35–45 woorden per minuut.'),
       sliderRow('Menselijke variatie', 'variation', 0, 100, 5, (v) => (v === 0 ? 'uit (robot)' : v + '%'),
         'Hoe meer variatie, hoe ongelijker de tijd tussen de letters.'),
+      rhythmRow,
       sliderRow('Pauze na een zin', 'sentencePause', 0, 5, 0.1, (v) => formatNumber(v) + ' s',
         'Extra wachten na . ! ? (na een komma ongeveer een derde hiervan).'),
       sliderRow('Pauze na een alinea', 'paragraphPause', 0, 10, 0.5, (v) => formatNumber(v) + ' s',
         'Extra wachten na een nieuwe regel.'),
       sliderRow('Tikfouten', 'typoRate', 0, 10, 0.5, (v) => (v === 0 ? 'uit' : formatNumber(v) + ' per 100 woorden'),
         'Typt soms een verkeerde letter en verbetert die meteen.'),
-      sliderRow('Leespauze tussen wijzigingen', 'readPause', 0, 10, 0.5, (v) => formatNumber(v) + ' s',
-        'Alleen voor de Verbeter-typer: even "lezen" voor de volgende wijziging.'),
+
+      groupTitle('Zinnen herschrijven', 'Zet dit aan op het tabblad Auto typer.'),
+      sliderRow('Hoe vaak', 'rewriteRate', 5, 50, 5, (v) => 'ongeveer 1 op de ' + Math.round(100 / v) + ' zinnen',
+        'Hij typt eerst een kladversie van de zin (een woord vergeten, een ander woord, woorden omgedraaid), ' +
+        'typt 1–3 zinnen verder en gaat dan terug om hem te verbeteren. Aan het eind staat je tekst er precies zo als je hem hebt geplakt.'),
+      selectRow('Hoe verbeteren', 'rewriteStyle',
+        [['mix', 'Afwisselend'], ['sentence', 'Hele zin wissen en opnieuw typen'], ['diff', 'Alleen het verschil aanpassen']]),
+
+      groupTitle('Snel typen in stukjes', 'Zet dit aan op het tabblad Auto typer.'),
+      sliderRow('Denkpauze tussen stukjes', 'burstPause', 0.2, 3, 0.1, (v) => formatNumber(v) + ' s',
+        'Hij typt steeds 1–4 woorden snel achter elkaar en denkt dan even na. Hoe langer de denkpauze, hoe sneller de stukjes ' +
+        'ertussen, zodat je gemiddelde snelheid gelijk blijft. Alleen bij een hoge snelheid met een lange pauze wordt het gemiddelde wat lager.'),
+
+      groupTitle('Overig'),
+      sliderRow('Leespauze', 'readPause', 0, 10, 0.5, (v) => formatNumber(v) + ' s',
+        'Even "lezen" voordat hij iets verandert: in de Verbeter-typer en bij Zinnen herschrijven.'),
       sliderRow('Aftellen voor start', 'countdown', 0, 10, 1, (v) => (v === 0 ? 'meteen' : v + ' s'),
         'Tijd om in je document te tikken nadat je op Start hebt gedrukt.')
     );
@@ -1185,7 +1768,7 @@
 
     Object.assign(ui, {
       host, panel, header, typeTab, improveTab, typeSection, improveSection, textarea, typeMeta,
-      oldTextarea, newTextarea, preview, improveNote, improveMeta,
+      rewriteToggle, burstToggle, oldTextarea, newTextarea, preview, improveNote, improveMeta,
       startBtn, pauseBtn, stopBtn, testBtn, select, bar, stats, status, bubble,
     });
 
@@ -1203,6 +1786,7 @@
     setMinimized(!!settings.minimized);
     setTab(settings.tab === 'improve' ? 'improve' : 'type');
     placePanel();
+    markProfile();
     updateControls();
   }
 
@@ -1237,8 +1821,9 @@
 
   function onSettingsChanged() {
     saveSettings();
+    markProfile();
     if (run.active && run.mode === 'type') {
-      run.estimate = buildEstimate(run.chars);
+      run.estimate = buildPlanEstimate(run.plan);
       updateProgress();
     } else if (run.active && run.mode === 'improve') {
       run.estimate = buildEditEstimate(run.edits);
@@ -1259,10 +1844,10 @@
         ui.typeMeta.textContent = 'Nog geen tekst.';
         return;
       }
-      const chars = toChars(text);
-      const estimate = buildEstimate(chars)[0];
+      const plan = currentTypingPlan(text);
+      const rewrites = plan.fixes.length ? ' · ' + plural(plan.fixes.length, 'zin', 'zinnen') + ' herschrijven' : '';
       ui.typeMeta.textContent = plural(countWords(text), 'woord', 'woorden') + ' · ' +
-        plural(chars.length, 'teken', 'tekens') + ' · duurt ongeveer ' + formatDuration(estimate);
+        plural(toChars(text).length, 'teken', 'tekens') + rewrites + ' · duurt ongeveer ' + formatDuration(buildPlanEstimate(plan)[0]);
     }, 150);
   }
 
@@ -1338,6 +1923,8 @@
     ui.testBtn.disabled = run.active;
     ui.typeTab.disabled = run.active;
     ui.improveTab.disabled = run.active;
+    ui.rewriteToggle.disabled = run.active;
+    ui.burstToggle.disabled = run.active;
     ui.pauseBtn.disabled = !run.active || run.mode === 'test' || (!run.startedAt && !run.countingDown);
     ui.stopBtn.disabled = !run.active || run.mode === 'test';
     ui.pauseBtn.textContent = run.paused ? '▶ Verder' : '⏸ Pauze';
