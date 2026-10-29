@@ -14,6 +14,10 @@
 (function () {
   'use strict';
 
+  // iPadOS kan zich als macOS identificeren; maxTouchPoints helpt dat herkennen.
+  const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
   if (window.__autoTyperLoaded) return;
   window.__autoTyperLoaded = true;
 
@@ -43,6 +47,7 @@
   };
 
   const settings = loadSettings();
+  if (IS_IOS) settings.method = 'input';
 
   function loadSettings() {
     try {
@@ -144,9 +149,27 @@
   function insertChar(ch, method) {
     const el = getInputElement();
     if (!el) throw new Error(MSG_NO_DOCS);
-    if (method === 'input') {
+    if (IS_IOS || method === 'input') {
       const doc = el.ownerDocument;
-      if (doc.activeElement !== el && el.focus) el.focus({ preventScroll: true });
+      const frame = getInputFrame();
+      try {
+        if (frame && frame.contentWindow) frame.contentWindow.focus();
+        if (el.focus) el.focus({ preventScroll: true });
+      } catch (e) { /* focus kan door Safari worden geweigerd */ }
+
+      if (IS_IOS) {
+        // Dit event is synthetisch en kan door Safari/Docs genegeerd worden;
+        // execCommand is de daadwerkelijke invoerpoging.
+        try {
+          el.dispatchEvent(new InputEvent('beforeinput', {
+            inputType: 'insertText',
+            data: ch,
+            bubbles: true,
+            cancelable: true,
+            composed: true
+          }));
+        } catch (e) { /* InputEvent-opties verschillen per Safari-versie */ }
+      }
       doc.execCommand('insertText', false, ch);
     } else {
       el.dispatchEvent(keyEvent('keypress', ch, codeFor(ch), ch.codePointAt(0)));
@@ -181,6 +204,7 @@
 
   // Typt het eerste teken en kijkt welke methode werkt (alleen bij Methode: Automatisch).
   async function detectMethod(ch) {
+    if (IS_IOS) return 'input';
     const before = caretSignature();
     insertChar(ch, 'keys');
     if (before === null) return 'keys'; // geen cursor gevonden: dan gaan we uit van toetsaanslagen
@@ -194,6 +218,11 @@
   }
 
   async function typeChar(ch) {
+    if (IS_IOS) {
+      if (!run.method) run.method = 'input';
+      insertChar(ch, 'input');
+      return;
+    }
     if (ch === '\n') return pressSpecialKey('Enter', 13);
     if (ch === '\t') return pressSpecialKey('Tab', 9);
     if (!run.method) {
@@ -240,6 +269,9 @@
 
   // Cursor een aantal tekens naar rechts, in kleine stapjes.
   async function moveRight(count, onStep) {
+    if (IS_IOS) {
+      throw new Error('Verbeter-typer werkt niet betrouwbaar op iPad met extern toetsenbord. Gebruik Auto typer voor de volledige tekst.');
+    }
     let left = count;
     while (left > 0) {
       const batch = Math.min(left, ARROWS_PER_STEP);
@@ -356,6 +388,7 @@
   async function typeSequence(chars, onProgress) {
     for (let i = 0; i < chars.length; i++) {
       await wait(delayBefore(chars, i));
+      if (IS_IOS) await wait(10 + Math.random() * 30);
       if (i > 0 && canTypo(chars[i]) && Math.random() < typoChance()) {
         await makeTypo(chars, i);
       }
@@ -723,6 +756,18 @@
 
   async function startImproving() {
     if (run.active) return;
+    if (IS_IOS) {
+      const replacementText = ui.newTextarea.value;
+      if (!replacementText.trim()) {
+        setStatus('Plak eerst de nieuwe volledige tekst. Op iPad werkt Verbeter-typer niet betrouwbaar; gebruik Auto typer.', 'warn');
+        return;
+      }
+      ui.textarea.value = replacementText;
+      saveText(TEXT_KEY, replacementText);
+      setTab('type');
+      setStatus('iPad-modus: de volledige tekst wordt via Auto typer ingevoerd. Selecteer in Google Docs eerst handmatig de bestaande tekst (of plaats de cursor waar de tekst moet komen) en druk daarna op Start.');
+      return;
+    }
     if (!ui.oldTextarea.value.trim() || !ui.newTextarea.value.trim()) {
       setStatus('Plak allebei de teksten: de tekst die nu in je document staat, en je nieuwe tekst.', 'warn');
       return;
@@ -750,7 +795,7 @@
           await deleteChars(e.delLen);
         }
         if (e.insChars.length) {
-          await wait(charDelay() * jitter());
+          await wait(IS_IOS ? 300 + Math.random() * 500 : charDelay() * jitter());
           await typeSequence(e.insChars);
         }
         run.done = k + 1;
@@ -1146,7 +1191,11 @@
     [['auto', 'Automatisch (aanbevolen)'], ['keys', 'Toetsaanslagen'], ['input', 'Tekstinvoer']].forEach(([value, label]) => {
       select.append(new Option(label, value));
     });
-    select.value = settings.method;
+    select.value = IS_IOS ? 'input' : settings.method;
+    if (IS_IOS) {
+      select.value = 'input';
+      select.disabled = true;
+    }
     select.addEventListener('change', () => {
       settings.method = select.value;
       if (run.active && settings.method !== 'auto') run.method = settings.method;
@@ -1156,7 +1205,9 @@
     testBtn.type = 'button';
     method.append(select, testBtn);
     methodRow.append(methodTop, method,
-      el('div', 'hint', 'Test typt "Test" in je document en wist het meteen weer. Lukt het niet? Kies een andere methode.'));
+      el('div', 'hint', IS_IOS
+        ? 'iPad-modus gebruikt tekstinvoer per teken. Safari/Google Docs kunnen dit alsnog weigeren; de test controleert of invoer echt verschijnt.'
+        : 'Test typt "Test" in je document en wist het meteen weer. Lukt het niet? Kies een andere methode.'));
     details.append(methodRow);
 
     const tip = el('div', 'tip', 'Tip: houd Safari open en je scherm aan tijdens het typen. Druk op Esc om te pauzeren.');
