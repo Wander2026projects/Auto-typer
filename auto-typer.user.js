@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Auto Typer voor Google Docs
 // @namespace    https://github.com/Wander2026projects/Auto-typer
-// @version      1.0.0
-// @description  Typt geplakte tekst letter voor letter in Google Docs, met instelbare snelheid (woorden per minuut), menselijke variatie, pauzes en tikfouten.
+// @version      1.1.0
+// @description  Typt geplakte tekst letter voor letter in Google Docs, met instelbare snelheid (woorden per minuut), menselijke variatie, pauzes en tikfouten. Met Verbeter-typer: past alleen de veranderde woorden aan.
 // @author       Wander2026projects
 // @match        https://docs.google.com/document/*
 // @run-at       document-idle
@@ -23,6 +23,8 @@
 
   const SETTINGS_KEY = 'autoTyper.settings.v1';
   const TEXT_KEY = 'autoTyper.text.v1';
+  const OLD_TEXT_KEY = 'autoTyper.oldText.v1';
+  const NEW_TEXT_KEY = 'autoTyper.newText.v1';
 
   const DEFAULTS = {
     wpm: 45,              // woorden per minuut (1 woord = 5 tekens)
@@ -30,8 +32,10 @@
     sentencePause: 0.6,   // seconden extra na . ! ?
     paragraphPause: 1.5,  // seconden extra na een nieuwe alinea
     typoRate: 2,          // tikfouten per 100 woorden
+    readPause: 2,         // seconden "lezen" tussen twee wijzigingen (Verbeter-typer)
     countdown: 3,         // seconden aftellen voor het typen begint
     method: 'auto',       // 'auto' | 'keys' | 'input'
+    tab: 'type',          // 'type' = Auto typer, 'improve' = Verbeter-typer
     settingsOpen: false,
     minimized: false,
     left: null,
@@ -54,17 +58,17 @@
     } catch (e) { /* opslag geblokkeerd: dan onthouden we het gewoon niet */ }
   }
 
-  function loadText() {
+  function loadText(key) {
     try {
-      return localStorage.getItem(TEXT_KEY) || '';
+      return localStorage.getItem(key) || '';
     } catch (e) {
       return '';
     }
   }
 
-  function saveText(text) {
+  function saveText(key, text) {
     try {
-      localStorage.setItem(TEXT_KEY, text);
+      localStorage.setItem(key, text);
     } catch (e) { /* tekst te groot of opslag geblokkeerd */ }
   }
 
@@ -116,8 +120,8 @@
   }
 
   // Google Docs leest nog de oude keyCode/charCode-velden, dus die vullen we ook in.
-  function keyEvent(type, key, code, keyCode) {
-    return new KeyboardEvent(type, {
+  function keyEvent(type, key, code, keyCode, modifiers) {
+    return new KeyboardEvent(type, Object.assign({
       key: key,
       code: code,
       keyCode: keyCode,
@@ -126,14 +130,14 @@
       bubbles: true,
       cancelable: true,
       composed: true,
-    });
+    }, modifiers));
   }
 
-  // Enter, Backspace en Tab verwerkt Google Docs bij 'keydown'.
-  function pressSpecialKey(key, keyCode) {
+  // Enter, Backspace, Tab en de pijltjes verwerkt Google Docs bij 'keydown'.
+  function pressSpecialKey(key, keyCode, modifiers) {
     const el = getInputElement();
     if (!el) throw new Error(MSG_NO_DOCS);
-    el.dispatchEvent(keyEvent('keydown', key, key, keyCode));
+    el.dispatchEvent(keyEvent('keydown', key, key, keyCode, modifiers));
   }
 
   // Gewone tekens: 'keys' = toetsaanslag (keypress), 'input' = tekstinvoer (zoals het schermtoetsenbord).
@@ -198,6 +202,56 @@
     }
     insertChar(ch, run.method);
   }
+
+  // Wacht tot de cursor een tijdje stil staat; geeft de laatste positie terug.
+  async function settledCaret() {
+    let last = caretSignature();
+    for (let k = 0; k < 10; k++) {
+      await wait(80);
+      const now = caretSignature();
+      if (now === last) return now;
+      last = now;
+    }
+    return last;
+  }
+
+  // Zet de cursor helemaal aan het begin van het document.
+  async function goToDocumentStart() {
+    pressSpecialKey('ArrowUp', 38, { metaKey: true }); // Mac/iPad: Cmd + pijltje omhoog
+    pressSpecialKey('Home', 36, { ctrlKey: true });    // Windows/Chromebook: Ctrl + Home
+    const atStart = await settledCaret();
+    if (atStart === null) return; // cursor niet te zien: we vertrouwen op de sneltoetsen
+
+    // Controle: aan het begin doet pijltje-links niets.
+    pressSpecialKey('ArrowLeft', 37);
+    if (await settledCaret() === atStart) return;
+
+    // Sneltoetsen werkten niet: dan met de pijltjes naar boven en naar links tot het niet verder kan.
+    for (const [key, keyCode] of [['ArrowUp', 38], ['ArrowLeft', 37]]) {
+      let before = caretSignature();
+      for (let round = 0; round < 2000; round++) {
+        for (let k = 0; k < 20; k++) pressSpecialKey(key, keyCode);
+        const now = await settledCaret();
+        if (now === before) break;
+        before = now;
+      }
+    }
+  }
+
+  // Cursor een aantal tekens naar rechts, in kleine stapjes.
+  async function moveRight(count, onStep) {
+    let left = count;
+    while (left > 0) {
+      const batch = Math.min(left, ARROWS_PER_STEP);
+      for (let k = 0; k < batch; k++) pressSpecialKey('ArrowRight', 39);
+      left -= batch;
+      if (onStep) onStep(count - left);
+      await wait(ARROW_STEP_MS);
+    }
+  }
+
+  const ARROWS_PER_STEP = 6;
+  const ARROW_STEP_MS = 20;
 
   // ---------------------------------------------------------------------------
   // Snelheid, pauzes en tikfouten
@@ -298,6 +352,25 @@
     await wait(150 + Math.random() * 250);
   }
 
+  // Typt een reeks tekens met het ingestelde tempo, pauzes en tikfouten.
+  async function typeSequence(chars, onProgress) {
+    for (let i = 0; i < chars.length; i++) {
+      await wait(delayBefore(chars, i));
+      if (i > 0 && canTypo(chars[i]) && Math.random() < typoChance()) {
+        await makeTypo(chars, i);
+      }
+      await typeChar(chars[i]);
+      if (onProgress) onProgress(i + 1);
+    }
+  }
+
+  async function deleteChars(count) {
+    for (let k = 0; k < count; k++) {
+      await wait(charDelay() * 0.6 * jitter());
+      pressSpecialKey('Backspace', 8);
+    }
+  }
+
   // Verwachte tijd per teken, voor de schatting "nog ongeveer ...".
   function expectedCost(chars, i) {
     const base = charDelay();
@@ -320,6 +393,186 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Verbeter-typer: verschillen tussen oude en nieuwe tekst
+  // ---------------------------------------------------------------------------
+
+  // Woorden, spaties, losse leestekens en nieuwe regels.
+  const TOKEN_RE = /\n|[^\S\n]+|[\p{L}\p{N}]+|[^\s\p{L}\p{N}]/gu;
+  const MAX_DIFF_CELLS = 4000000;
+
+  function tokenize(text) {
+    return text.match(TOKEN_RE) || [];
+  }
+
+  // Lijst a omzetten naar lijst b: [{t: 'eq' | 'del' | 'ins', s: item}, ...]
+  function alignLists(a, b) {
+    let p = 0;
+    while (p < a.length && p < b.length && a[p] === b[p]) p++;
+    let q = 0;
+    while (q < a.length - p && q < b.length - p && a[a.length - 1 - q] === b[b.length - 1 - q]) q++;
+
+    const ops = [];
+    for (let k = 0; k < p; k++) ops.push({ t: 'eq', s: a[k] });
+
+    const am = a.slice(p, a.length - q);
+    const bm = b.slice(p, b.length - q);
+    const n = am.length;
+    const m = bm.length;
+    if ((n + 1) * (m + 1) > MAX_DIFF_CELLS) {
+      am.forEach((s) => ops.push({ t: 'del', s }));
+      bm.forEach((s) => ops.push({ t: 'ins', s }));
+    } else {
+      // Langste gemeenschappelijke reeks (LCS).
+      const w = m + 1;
+      const table = new Uint32Array((n + 1) * w);
+      for (let i = n - 1; i >= 0; i--) {
+        for (let j = m - 1; j >= 0; j--) {
+          table[i * w + j] = am[i] === bm[j]
+            ? table[(i + 1) * w + j + 1] + 1
+            : Math.max(table[(i + 1) * w + j], table[i * w + j + 1]);
+        }
+      }
+      let i = 0;
+      let j = 0;
+      while (i < n && j < m) {
+        if (am[i] === bm[j]) {
+          ops.push({ t: 'eq', s: am[i] });
+          i++;
+          j++;
+        } else if (table[(i + 1) * w + j] >= table[i * w + j + 1]) {
+          ops.push({ t: 'del', s: am[i++] });
+        } else {
+          ops.push({ t: 'ins', s: bm[j++] });
+        }
+      }
+      while (i < n) ops.push({ t: 'del', s: am[i++] });
+      while (j < m) ops.push({ t: 'ins', s: bm[j++] });
+    }
+
+    for (let k = a.length - q; k < a.length; k++) ops.push({ t: 'eq', s: a[k] });
+    return ops;
+  }
+
+  // Eerst per alinea vergelijken, daarna per woord binnen de veranderde alinea's.
+  function diffTexts(oldText, newText) {
+    const lines = (text) => text.match(/[^\n]*\n|[^\n]+$/g) || [];
+    const ops = [];
+    let oldPart = '';
+    let newPart = '';
+    const flush = () => {
+      if (oldPart || newPart) ops.push(...alignLists(tokenize(oldPart), tokenize(newPart)));
+      oldPart = '';
+      newPart = '';
+    };
+    alignLists(lines(oldText), lines(newText)).forEach((op) => {
+      if (op.t === 'eq') {
+        flush();
+        ops.push(op);
+      } else if (op.t === 'del') {
+        oldPart += op.s;
+      } else {
+        newPart += op.s;
+      }
+    });
+    flush();
+    return ops;
+  }
+
+  function charLength(s) {
+    return Array.from(s).length;
+  }
+
+  // Wijzigingen als {start, del, ins} met posities in de oude tekst (in tekens).
+  function buildEdits(ops) {
+    const edits = [];
+    let pos = 0;
+    let current = null;
+    ops.forEach((op, k) => {
+      const len = charLength(op.s);
+      if (op.t === 'eq') {
+        // Een losse spatie tussen twee wijzigingen hoort bij de wijziging (dan vervangt hij een stukje zin in één keer).
+        const next = ops[k + 1];
+        if (current && /^[^\S\n]+$/.test(op.s) && next && next.t !== 'eq') {
+          current.del += op.s;
+          current.ins += op.s;
+        } else if (current) {
+          edits.push(current);
+          current = null;
+        }
+        pos += len;
+        return;
+      }
+      if (!current) current = { start: pos, del: '', ins: '' };
+      if (op.t === 'del') {
+        current.del += op.s;
+        pos += len;
+      } else {
+        current.ins += op.s;
+      }
+    });
+    if (current) edits.push(current);
+
+    // Eén woord dat op één woord lijkt: alleen het stukje dat anders is (werkt → werkte: alleen "e" erbij).
+    return edits.map((e) => {
+      if (/\s/.test(e.del) || /\s/.test(e.ins)) return e;
+      const del = Array.from(e.del);
+      const ins = Array.from(e.ins);
+      let p = 0;
+      while (p < del.length && p < ins.length && del[p] === ins[p]) p++;
+      let q = 0;
+      while (q < del.length - p && q < ins.length - p && del[del.length - 1 - q] === ins[ins.length - 1 - q]) q++;
+      return {
+        start: e.start + p,
+        del: del.slice(p, del.length - q).join(''),
+        ins: ins.slice(p, ins.length - q).join(''),
+      };
+    }).filter((e) => e.del || e.ins);
+  }
+
+  function normalizeForCompare(text) {
+    return text.replace(/\r\n?/g, '\n').replace(/\s+$/, '');
+  }
+
+  // Alles wat de Verbeter-typer nodig heeft: wijzigingen, cursorstappen en tijdschatting.
+  function planImprovement(oldRaw, newRaw) {
+    const oldText = normalizeForCompare(oldRaw);
+    let newText = normalizeForCompare(newRaw);
+    let note = '';
+    // Plak je tekst van ergens anders met lege regels tussen alinea's, terwijl je document die niet heeft?
+    if (!/\n\s*\n/.test(oldText) && /\n\s*\n/.test(newText)) {
+      newText = newText.replace(/\n(\s*\n)+/g, '\n');
+      note = 'Lege regels tussen alinea\'s in de nieuwe tekst worden genegeerd, want je document heeft die niet.';
+    }
+
+    const edits = buildEdits(diffTexts(oldText, newText));
+    let caret = 0;
+    let offset = 0;
+    edits.forEach((e) => {
+      e.delLen = charLength(e.del);
+      e.insChars = Array.from(e.ins);
+      const target = e.start + offset + e.delLen;
+      e.move = target - caret;
+      caret = target - e.delLen + e.insChars.length;
+      offset += e.insChars.length - e.delLen;
+    });
+    return { oldText, newText, edits, note };
+  }
+
+  function editCost(e, k) {
+    let ms = Math.ceil(e.move / ARROWS_PER_STEP) * ARROW_STEP_MS;
+    if (k > 0) ms += settings.readPause * 1000;
+    ms += e.delLen * charDelay() * 0.6;
+    if (e.insChars.length) ms += charDelay() + buildEstimate(e.insChars)[0];
+    return ms;
+  }
+
+  function buildEditEstimate(edits) {
+    const remaining = new Float64Array(edits.length + 1);
+    for (let k = edits.length - 1; k >= 0; k--) remaining[k] = remaining[k + 1] + editCost(edits[k], k);
+    return remaining;
+  }
+
+  // ---------------------------------------------------------------------------
   // Typen: starten, pauzeren, stoppen
   // ---------------------------------------------------------------------------
 
@@ -327,12 +580,15 @@
 
   const run = {
     active: false,
+    mode: 'type',       // 'type' | 'improve' | 'test'
     paused: false,
     stopRequested: false,
     method: null,
-    chars: [],
-    index: 0,
-    estimate: null,
+    chars: [],          // Auto typer: de tekst
+    edits: [],          // Verbeter-typer: de wijzigingen
+    done: 0,
+    total: 0,
+    estimate: null,     // verwachte resterende tijd per stap
     startedAt: 0,
     pausedAt: 0,
     pausedTotal: 0,
@@ -380,6 +636,63 @@
     } catch (e) { /* niet ondersteund: zet dan zelf automatische vergrendeling uit */ }
   }
 
+  function beginRun(mode, fields) {
+    Object.assign(run, {
+      active: true,
+      mode: mode,
+      paused: false,
+      stopRequested: false,
+      method: settings.method === 'auto' ? null : settings.method,
+      chars: [],
+      edits: [],
+      done: 0,
+      total: 0,
+      estimate: null,
+      startedAt: 0,
+      pausedAt: 0,
+      pausedTotal: 0,
+      waiters: [],
+      countingDown: settings.countdown > 0,
+    }, fields);
+
+    const focused = ui.host.shadowRoot.activeElement;
+    if (focused) focused.blur();
+    focusDocument();
+    watchEscape();
+    keepScreenOn(true);
+    updateControls();
+    updateProgress();
+  }
+
+  async function countdown(message) {
+    for (let s = settings.countdown; s > 0; s--) {
+      setStatus('Begint over ' + s + '… ' + message);
+      await wait(1000);
+    }
+    run.countingDown = false;
+    focusDocument();
+    await wait(150);
+    run.startedAt = Date.now();
+    updateControls();
+  }
+
+  function endRun() {
+    run.active = false;
+    run.paused = false;
+    run.countingDown = false;
+    keepScreenOn(false);
+    updateControls();
+    updateProgress();
+  }
+
+  function showError(e, stoppedMessage) {
+    if (e === STOP) {
+      setStatus(stoppedMessage);
+    } else {
+      setStatus(e.message || String(e), 'error');
+    }
+  }
+
   async function startTyping() {
     if (run.active) return;
     const text = ui.textarea.value;
@@ -388,74 +701,78 @@
       return;
     }
 
-    Object.assign(run, {
-      active: true,
-      paused: false,
-      stopRequested: false,
-      method: settings.method === 'auto' ? null : settings.method,
-      chars: toChars(text),
-      index: 0,
-      startedAt: 0,
-      pausedAt: 0,
-      pausedTotal: 0,
-      waiters: [],
-      countingDown: settings.countdown > 0,
-    });
-    run.estimate = buildEstimate(run.chars);
-
-    ui.textarea.blur();
-    focusDocument();
-    watchEscape();
-    keepScreenOn(true);
-    updateControls();
-    updateProgress();
+    const chars = toChars(text);
+    beginRun('type', { chars: chars, total: chars.length, estimate: buildEstimate(chars) });
 
     try {
-      for (let s = settings.countdown; s > 0; s--) {
-        setStatus('Begint over ' + s + '… Tik nu in je document waar de tekst moet komen.');
-        await wait(1000);
-      }
-      run.countingDown = false;
-      focusDocument();
-      await wait(150);
-
-      run.startedAt = Date.now();
-      updateControls();
+      await countdown('Tik nu in je document waar de tekst moet komen.');
       setStatus('Bezig met typen…');
-      const chars = run.chars;
-      for (let i = 0; i < chars.length; i++) {
-        await wait(delayBefore(chars, i));
-        if (i > 0 && canTypo(chars[i]) && Math.random() < typoChance()) {
-          await makeTypo(chars, i);
+      await typeSequence(chars, (done) => {
+        run.done = done;
+        updateProgress();
+      });
+      const words = countWords(text);
+      setStatus('Klaar! ✓ ' + words + ' ' + (words === 1 ? 'woord' : 'woorden') +
+        ' getypt in ' + formatDuration(activeTime()) + '.', 'ok');
+    } catch (e) {
+      showError(e, 'Gestopt na ' + run.done.toLocaleString('nl-NL') + ' tekens.');
+    } finally {
+      endRun();
+    }
+  }
+
+  async function startImproving() {
+    if (run.active) return;
+    if (!ui.oldTextarea.value.trim() || !ui.newTextarea.value.trim()) {
+      setStatus('Plak allebei de teksten: de tekst die nu in je document staat, en je nieuwe tekst.', 'warn');
+      return;
+    }
+    const plan = planImprovement(ui.oldTextarea.value, ui.newTextarea.value);
+    if (!plan.edits.length) {
+      setStatus('Er zijn geen verschillen tussen de twee teksten.', 'warn');
+      return;
+    }
+
+    beginRun('improve', { edits: plan.edits, total: plan.edits.length, estimate: buildEditEstimate(plan.edits) });
+
+    try {
+      await countdown('Tik niet in je document: hij zoekt zelf het begin op.');
+      setStatus('Begin van je document opzoeken…');
+      await goToDocumentStart();
+
+      for (let k = 0; k < plan.edits.length; k++) {
+        const e = plan.edits[k];
+        if (k > 0) await wait(spread(settings.readPause * 1000));
+        setStatus('Wijziging ' + (k + 1) + ' van ' + plan.edits.length + '…');
+        await moveRight(e.move);
+        if (e.delLen) {
+          await wait(200 + Math.random() * 300);
+          await deleteChars(e.delLen);
         }
-        await typeChar(chars[i]);
-        run.index = i + 1;
+        if (e.insChars.length) {
+          await wait(charDelay() * jitter());
+          await typeSequence(e.insChars);
+        }
+        run.done = k + 1;
         updateProgress();
       }
-
-      const words = countWords(ui.textarea.value);
-      setStatus('Klaar! ✓ ' + words + ' woorden getypt in ' + formatDuration(activeTime()) + '.', 'ok');
+      setStatus('Klaar! ✓ ' + plan.edits.length + ' ' + (plan.edits.length === 1 ? 'wijziging' : 'wijzigingen') +
+        ' gedaan in ' + formatDuration(activeTime()) + '. Controleer even of alles goed staat.', 'ok');
     } catch (e) {
-      if (e === STOP) {
-        setStatus('Gestopt na ' + run.index.toLocaleString('nl-NL') + ' tekens.');
-      } else {
-        setStatus(e.message || String(e), 'error');
-      }
+      showError(e, 'Gestopt na ' + run.done + ' van de ' + run.total + ' wijzigingen. ' +
+        'Let op: plak de tekst uit je document opnieuw in "Tekst nu in je document" voordat je opnieuw begint.');
     } finally {
-      run.active = false;
-      run.paused = false;
-      run.countingDown = false;
-      keepScreenOn(false);
-      updateControls();
-      updateProgress();
+      endRun();
     }
   }
 
   function pauseTyping() {
-    if (!run.active || run.paused) return;
+    if (!run.active || run.paused || run.mode === 'test') return;
     run.paused = true;
     run.pausedAt = Date.now();
-    setStatus('Gepauzeerd. Druk op Doorgaan om verder te typen.');
+    setStatus(run.mode === 'improve'
+      ? 'Gepauzeerd. Tik niet in je document, anders klopt de plek van de volgende wijziging niet. Druk op Verder om door te gaan.'
+      : 'Gepauzeerd. Druk op Verder om door te gaan.');
     keepScreenOn(false);
     updateControls();
   }
@@ -466,7 +783,7 @@
     run.paused = false;
     focusDocument();
     keepScreenOn(true);
-    setStatus(run.countingDown ? 'Aftellen…' : 'Bezig met typen…');
+    setStatus(run.countingDown ? 'Aftellen…' : 'Bezig…');
     updateControls();
     wakeWaiters();
   }
@@ -504,6 +821,7 @@
   async function runTest() {
     if (run.active) return;
     run.active = true;
+    run.mode = 'test';
     run.stopRequested = false;
     run.paused = false;
     run.method = settings.method === 'auto' ? null : settings.method;
@@ -562,13 +880,13 @@
       --accent: #4f46e5; --accent-dark: #4338ca; --text: #1f2330; --muted: #646a7a; --line: #e3e5ec; --soft: #f4f5f9;
     }
     * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    [hidden] { display: none !important; }
     .panel {
       position: fixed; z-index: 2147483000; width: ${PANEL_WIDTH}px; max-height: calc(100vh - 24px);
       display: flex; flex-direction: column; background: #fff; color: var(--text);
       border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 12px 36px rgba(20, 22, 40, .22);
       font-size: 14px; line-height: 1.4; overflow: hidden;
     }
-    .panel[hidden], .bubble[hidden] { display: none; }
     .header {
       display: flex; align-items: center; gap: 8px; padding: 10px 10px 10px 14px; background: var(--accent); color: #fff;
       cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; flex: none;
@@ -580,13 +898,32 @@
       font-size: 20px; line-height: 1; cursor: pointer; display: grid; place-items: center;
     }
     .body { padding: 12px 14px 14px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    .tabs { display: flex; gap: 4px; padding: 4px; margin-bottom: 10px; border-radius: 12px; background: var(--soft); }
+    .tab {
+      flex: 1; height: 36px; border: 0; border-radius: 9px; background: transparent; color: var(--muted);
+      font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    .tab.active { background: #fff; color: var(--text); box-shadow: 0 1px 3px rgba(20, 22, 40, .14); }
+    .tab:disabled { cursor: default; }
+    .field-label { display: block; font-size: 12.5px; font-weight: 600; margin: 8px 2px 4px; }
+    .field-label:first-child { margin-top: 0; }
     textarea {
       width: 100%; min-height: 120px; max-height: 40vh; resize: vertical; padding: 10px; border-radius: 10px;
       border: 1px solid var(--line); background: var(--soft); color: var(--text); font-size: 14px; line-height: 1.45;
     }
+    textarea.small { min-height: 84px; }
     textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; background: #fff; }
     textarea[readonly] { opacity: .7; }
     .meta { color: var(--muted); font-size: 12.5px; margin: 6px 2px 10px; }
+    .preview {
+      margin-top: 8px; max-height: 190px; overflow-y: auto; padding: 8px 10px; border: 1px solid var(--line);
+      border-radius: 10px; font-size: 13px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    .preview .del { background: #fde2e2; color: #a1231f; text-decoration: line-through; border-radius: 3px; }
+    .preview .ins { background: #dcf5e3; color: #17602f; border-radius: 3px; }
+    .preview .del + .ins { margin-left: 3px; }
+    .preview .gap { color: var(--muted); }
+    .note { color: #7a5200; font-size: 12px; margin-top: 4px; }
     .buttons { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 8px; }
     button.btn {
       height: 42px; border-radius: 10px; border: 1px solid var(--line); background: #fff; color: var(--text);
@@ -655,6 +992,10 @@
     return words.length;
   }
 
+  function plural(n, one, many) {
+    return n.toLocaleString('nl-NL') + ' ' + (n === 1 ? one : many);
+  }
+
   function sliderRow(label, key, min, max, step, format, hint) {
     const row = el('div', 'row');
     const top = el('div', 'row-top');
@@ -685,6 +1026,23 @@
     return row;
   }
 
+  function textField(label, key, placeholder, small) {
+    const lab = el('label', 'field-label', label);
+    lab.htmlFor = 'at-field-' + key;
+    const textarea = el('textarea', small ? 'small' : null);
+    textarea.id = 'at-field-' + key;
+    textarea.placeholder = placeholder;
+    textarea.value = loadText(key);
+    textarea.spellcheck = false;
+    let saveTimer = 0;
+    textarea.addEventListener('input', () => {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => saveText(key, textarea.value), 400);
+      updateMeta();
+    });
+    return [lab, textarea];
+  }
+
   function buildUI() {
     const host = document.createElement('div');
     host.id = 'auto-typer-host';
@@ -713,18 +1071,30 @@
     // Inhoud
     const body = el('div', 'body');
 
-    const textarea = el('textarea');
-    textarea.placeholder = 'Plak hier de tekst die getypt moet worden…';
-    textarea.value = loadText();
-    textarea.spellcheck = false;
-    let saveTimer = 0;
-    textarea.addEventListener('input', () => {
-      clearTimeout(saveTimer);
-      saveTimer = setTimeout(() => saveText(textarea.value), 400);
-      updateMeta();
-    });
+    // Tabbladen
+    const tabs = el('div', 'tabs');
+    const typeTab = el('button', 'tab', 'Auto typer');
+    const improveTab = el('button', 'tab', 'Verbeter-typer');
+    [typeTab, improveTab].forEach((b) => { b.type = 'button'; });
+    tabs.append(typeTab, improveTab);
 
-    const meta = el('div', 'meta');
+    // Auto typer
+    const typeSection = el('div');
+    const [, textarea] = textField('Tekst', TEXT_KEY, 'Plak hier de tekst die getypt moet worden…');
+    const typeMeta = el('div', 'meta');
+    typeSection.append(textarea, typeMeta);
+
+    // Verbeter-typer
+    const improveSection = el('div');
+    const [oldLabel, oldTextarea] = textField('1. Tekst nu in je document', OLD_TEXT_KEY,
+      'In Google Docs: Bewerken → Alles selecteren, kopiëren, en hier plakken…', true);
+    const [newLabel, newTextarea] = textField('2. Nieuwe tekst', NEW_TEXT_KEY,
+      'Plak hier je verbeterde tekst…', true);
+    const previewLabel = el('div', 'field-label', 'Wat er verandert');
+    const preview = el('div', 'preview');
+    const improveNote = el('div', 'note');
+    const improveMeta = el('div', 'meta');
+    improveSection.append(oldLabel, oldTextarea, newLabel, newTextarea, previewLabel, preview, improveNote, improveMeta);
 
     const buttons = el('div', 'buttons');
     const startBtn = el('button', 'btn start', '▶ Start');
@@ -737,7 +1107,7 @@
     const bar = el('div', 'bar');
     progress.append(bar);
     const stats = el('div', 'stats');
-    const status = el('div', 'status', 'Tik in je document waar de tekst moet komen en druk op Start.');
+    const status = el('div', 'status');
 
     // Instellingen
     const details = el('details');
@@ -759,6 +1129,8 @@
         'Extra wachten na een nieuwe regel.'),
       sliderRow('Tikfouten', 'typoRate', 0, 10, 0.5, (v) => (v === 0 ? 'uit' : formatNumber(v) + ' per 100 woorden'),
         'Typt soms een verkeerde letter en verbetert die meteen.'),
+      sliderRow('Leespauze tussen wijzigingen', 'readPause', 0, 10, 0.5, (v) => formatNumber(v) + ' s',
+        'Alleen voor de Verbeter-typer: even "lezen" voor de volgende wijziging.'),
       sliderRow('Aftellen voor start', 'countdown', 0, 10, 1, (v) => (v === 0 ? 'meteen' : v + ' s'),
         'Tijd om in je document te tikken nadat je op Start hebt gedrukt.')
     );
@@ -789,7 +1161,7 @@
 
     const tip = el('div', 'tip', 'Tip: houd Safari open en je scherm aan tijdens het typen. Druk op Esc om te pauzeren.');
 
-    body.append(textarea, meta, buttons, progress, stats, status, details, tip);
+    body.append(tabs, typeSection, improveSection, buttons, progress, stats, status, details, tip);
     panel.append(header, body);
 
     // Klein gemaakt: alleen een rond knopje
@@ -802,10 +1174,14 @@
     document.documentElement.append(host);
 
     Object.assign(ui, {
-      host, panel, header, textarea, meta, startBtn, pauseBtn, stopBtn, testBtn, select, bar, stats, status, bubble,
+      host, panel, header, typeTab, improveTab, typeSection, improveSection, textarea, typeMeta,
+      oldTextarea, newTextarea, preview, improveNote, improveMeta,
+      startBtn, pauseBtn, stopBtn, testBtn, select, bar, stats, status, bubble,
     });
 
-    startBtn.addEventListener('click', startTyping);
+    typeTab.addEventListener('click', () => setTab('type'));
+    improveTab.addEventListener('click', () => setTab('improve'));
+    startBtn.addEventListener('click', () => (settings.tab === 'improve' ? startImproving() : startTyping()));
     pauseBtn.addEventListener('click', () => (run.paused ? resumeTyping() : pauseTyping()));
     stopBtn.addEventListener('click', stopTyping);
     testBtn.addEventListener('click', runTest);
@@ -815,8 +1191,8 @@
     enableDragging(header);
     window.addEventListener('resize', () => placePanel());
     setMinimized(!!settings.minimized);
+    setTab(settings.tab === 'improve' ? 'improve' : 'type');
     placePanel();
-    updateMeta();
     updateControls();
   }
 
@@ -829,12 +1205,33 @@
     ui.status.className = 'status' + (kind ? ' ' + kind : '');
   }
 
+  function setTab(tab) {
+    if (run.active) return;
+    settings.tab = tab;
+    saveSettings();
+    const improve = tab === 'improve';
+    ui.typeTab.classList.toggle('active', !improve);
+    ui.improveTab.classList.toggle('active', improve);
+    ui.typeSection.hidden = improve;
+    ui.improveSection.hidden = !improve;
+    run.done = 0;
+    run.total = 0;
+    updateProgress();
+    setStatus(improve
+      ? 'Plak de tekst uit je document en je nieuwe tekst, bekijk de wijzigingen en druk op Start.'
+      : 'Tik in je document waar de tekst moet komen en druk op Start.');
+    updateMeta();
+  }
+
   let metaTimer = 0;
 
   function onSettingsChanged() {
     saveSettings();
-    if (run.active && run.chars.length) {
+    if (run.active && run.mode === 'type') {
       run.estimate = buildEstimate(run.chars);
+      updateProgress();
+    } else if (run.active && run.mode === 'improve') {
+      run.estimate = buildEditEstimate(run.edits);
       updateProgress();
     }
     updateMeta();
@@ -843,42 +1240,98 @@
   function updateMeta() {
     clearTimeout(metaTimer);
     metaTimer = setTimeout(() => {
+      if (settings.tab === 'improve') {
+        updateImproveMeta();
+        return;
+      }
       const text = ui.textarea.value;
       if (!text.trim()) {
-        ui.meta.textContent = 'Nog geen tekst.';
+        ui.typeMeta.textContent = 'Nog geen tekst.';
         return;
       }
       const chars = toChars(text);
       const estimate = buildEstimate(chars)[0];
-      ui.meta.textContent = countWords(text).toLocaleString('nl-NL') + ' woorden · ' +
-        chars.length.toLocaleString('nl-NL') + ' tekens · duurt ongeveer ' + formatDuration(estimate);
+      ui.typeMeta.textContent = plural(countWords(text), 'woord', 'woorden') + ' · ' +
+        plural(chars.length, 'teken', 'tekens') + ' · duurt ongeveer ' + formatDuration(estimate);
     }, 150);
   }
 
+  // Kleurenoverzicht: rood doorgestreept = weg, groen = erbij.
+  function updateImproveMeta() {
+    const preview = ui.preview;
+    preview.replaceChildren();
+    ui.improveNote.textContent = '';
+    if (!ui.oldTextarea.value.trim() || !ui.newTextarea.value.trim()) {
+      preview.append(el('span', 'gap', 'Hier zie je de wijzigingen zodra je allebei de teksten hebt geplakt.'));
+      ui.improveMeta.textContent = '';
+      return;
+    }
+
+    const plan = planImprovement(ui.oldTextarea.value, ui.newTextarea.value);
+    ui.improveNote.textContent = plan.note;
+    if (!plan.edits.length) {
+      preview.append(el('span', 'gap', 'Geen verschillen gevonden: de teksten zijn hetzelfde.'));
+      ui.improveMeta.textContent = '';
+      return;
+    }
+
+    const oldChars = Array.from(plan.oldText);
+    const showNewlines = (s) => s.replace(/\n/g, '↵\n');
+    const unchanged = (from, to, first, last) => {
+      const text = oldChars.slice(from, to).join('');
+      const chars = Array.from(text);
+      const keep = 60;
+      if (chars.length <= keep * 2 + 10) return preview.append(text);
+      if (!first) preview.append(chars.slice(0, keep).join(''));
+      preview.append(el('span', 'gap', first ? '… ' : ' … '));
+      if (!last) preview.append(chars.slice(chars.length - keep).join(''));
+    };
+
+    let pos = 0;
+    let removed = 0;
+    let added = 0;
+    plan.edits.forEach((e, k) => {
+      unchanged(pos, e.start, k === 0, false);
+      if (e.del) preview.append(el('span', 'del', showNewlines(e.del)));
+      if (e.ins) preview.append(el('span', 'ins', showNewlines(e.ins)));
+      pos = e.start + e.delLen;
+      removed += countWords(e.del);
+      added += countWords(e.ins);
+    });
+    unchanged(pos, oldChars.length, false, true);
+
+    const time = buildEditEstimate(plan.edits)[0];
+    ui.improveMeta.textContent = plural(plan.edits.length, 'wijziging', 'wijzigingen') + ' · ' +
+      removed + ' weg · ' + added + ' erbij · duurt ongeveer ' + formatDuration(time);
+  }
+
   function updateProgress() {
-    const total = run.chars.length;
-    const pct = total ? Math.floor((run.index / total) * 100) : 0;
-    ui.bar.style.width = (total ? (run.index / total) * 100 : 0) + '%';
+    const total = run.total;
+    const pct = total ? Math.floor((run.done / total) * 100) : 0;
+    ui.bar.style.width = (total ? (run.done / total) * 100 : 0) + '%';
 
     if (!total) {
       ui.stats.textContent = '';
     } else {
-      const parts = [pct + '%', run.index.toLocaleString('nl-NL') + ' / ' + total.toLocaleString('nl-NL') + ' tekens'];
-      if (run.active && run.estimate) parts.push('nog ± ' + formatDuration(run.estimate[run.index]));
+      const unit = run.mode === 'improve' ? 'wijzigingen' : 'tekens';
+      const parts = [pct + '%', run.done.toLocaleString('nl-NL') + ' / ' + total.toLocaleString('nl-NL') + ' ' + unit];
+      if (run.active && run.estimate) parts.push('nog ± ' + formatDuration(run.estimate[run.done]));
       const minutes = activeTime() / 60000;
-      if (run.active && minutes > 0.05) parts.push(Math.round(run.index / 5 / minutes) + ' wpm');
+      if (run.active && run.mode === 'type' && minutes > 0.05) parts.push(Math.round(run.done / 5 / minutes) + ' wpm');
       ui.stats.textContent = parts.join(' · ');
     }
-    ui.bubble.textContent = run.active ? pct + '%' : '⌨️';
+    ui.bubble.textContent = run.active && total ? pct + '%' : '⌨️';
   }
 
   function updateControls() {
     ui.startBtn.disabled = run.active;
     ui.testBtn.disabled = run.active;
-    ui.pauseBtn.disabled = !run.active || (!run.startedAt && !run.countingDown);
-    ui.stopBtn.disabled = !run.active;
+    ui.typeTab.disabled = run.active;
+    ui.improveTab.disabled = run.active;
+    ui.pauseBtn.disabled = !run.active || run.mode === 'test' || (!run.startedAt && !run.countingDown);
+    ui.stopBtn.disabled = !run.active || run.mode === 'test';
     ui.pauseBtn.textContent = run.paused ? '▶ Verder' : '⏸ Pauze';
-    ui.textarea.readOnly = run.active;
+    [ui.textarea, ui.oldTextarea, ui.newTextarea].forEach((t) => { t.readOnly = run.active; });
   }
 
   function setMinimized(min) {
