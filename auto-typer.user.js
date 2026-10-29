@@ -220,6 +220,14 @@
   async function typeChar(ch) {
     if (IS_IOS) {
       if (!run.method) run.method = 'input';
+      const el = getInputElement();
+      if (!el) throw new Error(MSG_NO_DOCS);
+      const frame = getInputFrame();
+      try {
+        if (frame && frame.contentWindow) frame.contentWindow.focus();
+        if (el.focus) el.focus({ preventScroll: true });
+      } catch (e) { /* Safari kan focus beperken */ }
+      await wait(50);
       insertChar(ch, 'input');
       return;
     }
@@ -387,8 +395,13 @@
   // Typt een reeks tekens met het ingestelde tempo, pauzes en tikfouten.
   async function typeSequence(chars, onProgress) {
     for (let i = 0; i < chars.length; i++) {
-      await wait(delayBefore(chars, i));
-      if (IS_IOS) await wait(10 + Math.random() * 30);
+      if (IS_IOS) {
+        // iPad: snelle, incrementele invoer via execCommand per teken.
+        if (i > 0) await wait(10 + Math.random() * 30);
+        if (i > 0 && i % 15 === 0) await wait(120 + Math.random() * 180);
+      } else {
+        await wait(delayBefore(chars, i));
+      }
       if (i > 0 && canTypo(chars[i]) && Math.random() < typoChance()) {
         await makeTypo(chars, i);
       }
@@ -765,7 +778,7 @@
       ui.textarea.value = replacementText;
       saveText(TEXT_KEY, replacementText);
       setTab('type');
-      setStatus('iPad-modus: de volledige tekst wordt via Auto typer ingevoerd. Selecteer in Google Docs eerst handmatig de bestaande tekst (of plaats de cursor waar de tekst moet komen) en druk daarna op Start.');
+      setStatus('iPad-modus: Verbeter-typer is uitgeschakeld omdat caret-bewegingen niet betrouwbaar werken. De volledige tekst staat nu klaar in Auto typer. Selecteer in Google Docs handmatig de bestaande tekst (of plaats de cursor) en druk daarna op Start.');
       return;
     }
     if (!ui.oldTextarea.value.trim() || !ui.newTextarea.value.trim()) {
@@ -929,7 +942,7 @@
     .panel {
       position: fixed; z-index: 2147483000; width: ${PANEL_WIDTH}px; max-height: calc(100vh - 24px);
       display: flex; flex-direction: column; background: #fff; color: var(--text);
-      border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 12px 36px rgba(20, 22, 40, .22);
+      border: 2px solid #007aff; border-radius: 16px; box-shadow: 0 12px 36px rgba(20, 22, 40, .22);
       font-size: 14px; line-height: 1.4; overflow: hidden;
     }
     .header {
