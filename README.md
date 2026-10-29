@@ -3,11 +3,12 @@
 Typt je tekst letter voor letter in een Google Doc, alsof je hem zelf typt. Je stelt zelf in:
 
 - hoe snel hij typt (**woorden per minuut**), of in één keer met **Snelkeuze**: Rustig, Gemiddeld of Snel
+- of **hoe lang het mag duren**: vul in "klaar in 1 uur en 30 minuten" en hij rekent de snelheid zelf uit
 - **menselijke variatie** (niet robotachtig: de tijd tussen letters wisselt)
 - **natuurlijk ritme**: bekende woorden gaan sneller, hoofdletters en cijfers langzamer
 - **pauzes** na een zin en na een alinea
 - **tikfouten** die hij meteen zelf verbetert
-- **zinnen herschrijven**: soms gaat hij 1–3 zinnen terug en verbetert hij een zin
+- **zinnen herschrijven**: soms gaat hij 1–3 zinnen terug en verbetert hij rustig een zin met 3–5 fouten
 - **snel typen in stukjes**: een paar woorden snel, even nadenken, dan weer verder
 - **aftellen** voordat hij begint
 
@@ -58,10 +59,11 @@ Onder het tekstvak staan twee schakelaars:
 
 | Schakelaar | Wat het doet |
 |---|---|
-| Zinnen herschrijven | Typt soms eerst een kladversie van een zin, typt 1–3 zinnen verder, gaat dan terug en verbetert de zin. Meer uitleg hieronder. |
+| Zinnen herschrijven | Typt soms eerst een kladversie van een zin met 3–5 fouten, typt 1–3 zinnen verder, gaat dan rustig terug en verbetert de zin. Meer uitleg hieronder. |
 | Snel typen in stukjes | Typt steeds 1–4 woorden snel achter elkaar, denkt dan even na, en gaat weer verder. Meer uitleg hieronder. |
+| Klaar in … uur … min | Hoe lang het typen mag duren. Leeg laten = je gewone snelheid. Meer uitleg hieronder. |
 
-Tijdens het typen kun je deze schakelaars niet veranderen. Zet ze goed voordat je op Start drukt.
+Tijdens het typen kun je deze schakelaars en de tijd niet veranderen. Zet ze goed voordat je op Start drukt.
 
 ### Instellingen
 
@@ -75,6 +77,7 @@ Tijdens het typen kun je deze schakelaars niet veranderen. Zet ze goed voordat j
 | Pauze na een alinea | Extra wachten na een nieuwe regel | 1,5 s |
 | Tikfouten | Hoe vaak hij een verkeerde letter typt (een letter die er op het toetsenbord naast ligt). Soms typt hij nog 1–2 letters door en wist hij dan terug, zoals een mens doet. | 2 per 100 woorden |
 | Zinnen herschrijven → Hoe vaak | Hoeveel zinnen hij eerst als kladversie typt | ongeveer 1 op de 10 zinnen |
+| Zinnen herschrijven → Tempo bij verbeteren | Hoe rustig hij typt en wist als hij een zin verbetert (20–100% van je snelheid). Hoe lager, hoe rustiger; de cursor loopt dan ook langzamer woord voor woord terug. | 50% |
 | Zinnen herschrijven → Hoe verbeteren | **Hele zin wissen en opnieuw typen**, **Alleen het verschil aanpassen**, of **Afwisselend** (elke keer willekeurig één van de twee) | Afwisselend |
 | Denkpauze tussen stukjes | Voor Snel typen in stukjes: hoe lang hij nadenkt tussen twee stukjes | 1 s |
 | Leespauze | Hoe lang hij even "leest" voordat hij iets verandert: in de Verbeter-typer en voordat hij een zin herschrijft | 2 s |
@@ -89,22 +92,29 @@ Je kunt de instellingen ook veranderen **terwijl** hij aan het typen is. De nieu
 
 Zet de schakelaar **Zinnen herschrijven** aan op het tabblad Auto typer. Dan typt hij af en toe eerst een **kladversie** van een zin, en verbetert hij die later:
 
-1. Hij typt een kladversie van de zin. Bijvoorbeeld met een woord vergeten, een ander woord, een woordje te veel, twee woorden omgedraaid, of een zin die nog niet af is.
+1. Hij typt een kladversie van de zin met **3 tot 5 fouten** (willekeurig). Het kunnen deze fouten zijn:
+   - **spelfouten** die blijven staan: twee letters omgedraaid (*shcool*), een letter ernaast (*schiol*), of een dt-fout (*wordt* → *word*)
+   - een **woord vergeten**, of een **woordje te veel** (*echt*, *gewoon*, *really*…)
+   - eerst een **ander woord** (*omdat* → *want*, *echter* → *toch*, *difficult* → *hard*)
+   - een **komma vergeten**, of een **komma te veel** (*Ik denk, dat…*)
+   - een **zinsdeel op een andere plek** (*Daarna mochten we…* → *We mochten daarna…*)
+   - **twee woorden omgedraaid**, of een **zin die nog niet af is**
 2. Hij typt gewoon door: 1, 2 of 3 zinnen (willekeurig).
-3. Hij "leest" even terug (de **Leespauze**), gaat met de cursor terug naar de kladzin en verbetert hem. Afhankelijk van **Hoe verbeteren** wist hij de hele zin en typt hij hem opnieuw, of past hij alleen het stukje aan dat anders is.
-4. Daarna gaat hij terug naar waar hij was en typt hij verder.
+3. Hij "leest" even terug (de **Leespauze**). Dan loopt de cursor **rustig woord voor woord** terug naar de kladzin, en verbetert hij hem op het **Tempo bij verbeteren** (standaard de helft van je snelheid). Afhankelijk van **Hoe verbeteren** wist hij de hele zin en typt hij hem opnieuw, of verbetert hij de fouten één voor één, met even nadenken ertussen.
+4. Daarna loopt de cursor weer rustig terug naar waar hij was, en typt hij verder.
 
 | Jouw zin | Kladversie |
 |---|---|
-| We gingen met de trein, omdat dat het snelst was. | We gingen met de trein, want dat het snelst was. |
-| Het museum was echter groter dan ik had gedacht. | Het museum was toch groter dan ik had gedacht. |
-| Ik fiets elke dag naar school. | Ik fiets elke dag. |
-| It was very cold in the mornings. | It was basically very cold in the mornings. |
+| We gingen met de trein, omdat dat het snelst was. | We gingen wel met de trien okdat, dat het snelst was. |
+| Daarna mochten we zelf rondlopen en een opdracht maken. | We mochten daarna zlef rondlopen, en opdracht een maken. |
+| Ik vond het eigenlijk best moeilijk om alle vragen te beantwoorden! | Ik vnod het eigenlijk best lastig om alle vargen te beantwoorden! |
+| It was very cold in the mornings, but the views were really beautiful. | It was really cokd in the mornings but the were really beautiufl. |
 
 **Aan het eind staat je tekst er altijd precies zo als je hem hebt geplakt.** De kladversie bedenkt hij zelf, je hoeft niets extra's te doen. Hij werkt met Nederlandse en Engelse tekst.
 
 Goed om te weten:
-- Hij gaat alleen terug binnen **dezelfde alinea**. Zinnen met minder dan 4 woorden slaat hij over.
+- Hij gaat alleen terug binnen **dezelfde alinea**. Zinnen met minder dan 6 woorden, of waar geen 3 fouten in passen, slaat hij over. Er worden dus vooral langere zinnen herschreven.
+- Staat in Google Docs *Automatisch spelling corrigeren* aan, dan verbetert Google Docs sommige spelfouten in de kladzin misschien meteen zelf. Dat is niet erg: het eindresultaat klopt nog steeds. Wil je de spelfouten wel zien staan? Zet het uit bij **Extra → Voorkeuren**.
 - Zinnen met emoji, of met iets dat Google Docs zelf vervangt (zoals `(c)`, `->`, `...` of `1/2`), herschrijft hij niet. Daar zou het tellen van de cursorstappen mis kunnen gaan.
 - In het paneel zie je hoeveel zinnen hij gaat herschrijven, en de tijdschatting telt dat mee. Druk je nog een keer op Start, dan kiest hij andere zinnen.
 - **Tik niet in je document tijdens het typen of een pauze**, anders gaat hij op de verkeerde plek verbeteren.
@@ -120,6 +130,18 @@ Zet de schakelaar **Snel typen in stukjes** aan op het tabblad Auto typer. Dan t
 - Hoe lang hij nadenkt, stel je in bij **Instellingen → Denkpauze tussen stukjes**.
 - Na een punt, komma of nieuwe alinea begint ook een nieuw stukje. Daar gebruikt hij de gewone pauze na een zin of alinea.
 - **Je gemiddelde snelheid blijft gelijk.** Hij typt de stukjes sneller dan je ingestelde snelheid, zodat de denkpauzes dat weer goedmaken. Hoe langer de denkpauze, hoe sneller de stukjes. Sneller dan ongeveer 3× je ingestelde snelheid gaat hij niet. Bij een hoge snelheid met een lange denkpauze wordt het gemiddelde dus wat lager. De tijdschatting houdt daar rekening mee.
+- Dit werkt alleen in het tabblad Auto typer, niet in de Verbeter-typer.
+
+---
+
+## ⏱️ Klaar in een vaste tijd
+
+Wil je dat het typen bijvoorbeeld 1 uur en 30 minuten duurt? Vul onder de schakelaars in: **Klaar in [ 1 ] uur [ 30 ] min**. Laat je de vakjes leeg, dan typt hij op je gewone snelheid.
+
+- Hij rekent zelf uit hoe snel hij moet typen, met alles erbij: pauzes, tikfouten, denkpauzes en zinnen herschrijven. Onder het tekstvak zie je welke snelheid dat wordt, en bij **Instellingen → Snelheid** staat dan *automatisch*.
+- Hij typt **niet langzamer dan 20 woorden per minuut**, want langzamer ziet er niet echt uit. Is er dan nog tijd over, dan neemt hij **lange pauzes tussendoor**: gemiddeld zo'n 3 minuten, liefst na een alinea (anders na een zin). Tijdens zo'n pauze zie je in het paneel hoe lang hij nog pauzeert.
+- **Is de tijd te kort**, dan begint hij niet. Hij zegt dan hoe lang het minstens duurt (op de hoogste snelheid, 300 woorden per minuut). Vul dan een langere tijd in.
+- De tijd is een schatting: het kan een paar procent eerder of later klaar zijn. Pauzeer je tussendoor, dan telt die pauze niet mee.
 - Dit werkt alleen in het tabblad Auto typer, niet in de Verbeter-typer.
 
 ---

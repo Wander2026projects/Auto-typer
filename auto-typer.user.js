@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Auto Typer voor Google Docs
 // @namespace    https://github.com/Wander2026projects/Auto-typer
-// @version      1.3.0
-// @description  Typt geplakte tekst letter voor letter in Google Docs, met instelbare snelheid (woorden per minuut), menselijke variatie, natuurlijk ritme, pauzes, tikfouten, zinnen herschrijven en typen in stukjes. Met Verbeter-typer: past alleen de veranderde woorden aan.
+// @version      1.4.0
+// @description  Typt geplakte tekst letter voor letter in Google Docs, met instelbare snelheid (woorden per minuut), menselijke variatie, natuurlijk ritme, pauzes, tikfouten, zinnen herschrijven, typen in stukjes en een vaste eindtijd. Met Verbeter-typer: past alleen de veranderde woorden aan.
 // @author       Wander2026projects
 // @match        https://docs.google.com/document/*
 // @run-at       document-idle
@@ -39,10 +39,13 @@
     rewriteOn: false,     // Zinnen herschrijven aan/uit
     rewriteRate: 10,      // % van de zinnen dat eerst als kladversie komt
     rewriteStyle: 'mix',  // 'mix' | 'sentence' (hele zin opnieuw) | 'diff' (alleen het verschil)
+    rewriteTempo: 50,     // % van je snelheid bij het verbeteren van een zin (lager = rustiger)
     burstOn: false,       // Snel typen in stukjes aan/uit
     burstPause: 1,        // seconden nadenken tussen twee stukjes
     readPause: 2,         // seconden "lezen" voor een wijziging (Verbeter-typer en Zinnen herschrijven)
     countdown: 3,         // seconden aftellen voor het typen begint
+    targetHours: 0,       // Auto typer: klaar in zoveel uur en minuten (0 en 0 = gewone snelheid)
+    targetMinutes: 0,
     method: 'auto',       // 'auto' | 'keys' | 'input'
     tab: 'type',          // 'type' = Auto typer, 'improve' = Verbeter-typer
     settingsOpen: false,
@@ -299,8 +302,32 @@
     z: 'asx', x: 'zsdc', c: 'xdfv', v: 'cfgb', b: 'vghn', n: 'bhjm', m: 'njk',
   };
 
+  let paceWpm = null;  // de snelheid die hij zelf uitrekent als je een tijd hebt ingevuld
+  let tempoFactor = 1; // groter dan 1 = langzamer (bij het verbeteren van een zin)
+
   function charDelay() {
-    return 12000 / settings.wpm; // 60.000 ms / (wpm × 5 tekens)
+    return (12000 / (paceWpm || settings.wpm)) * tempoFactor; // 60.000 ms / (wpm × 5 tekens)
+  }
+
+  // Even rekenen met een andere snelheid of een ander tempo (voor de tijdschatting).
+  function withWpm(wpm, fn) {
+    const saved = paceWpm;
+    paceWpm = wpm;
+    try {
+      return fn();
+    } finally {
+      paceWpm = saved;
+    }
+  }
+
+  function withTempo(factor, fn) {
+    const saved = tempoFactor;
+    tempoFactor = factor;
+    try {
+      return fn();
+    } finally {
+      tempoFactor = saved;
+    }
   }
 
   function gaussian() {
@@ -682,9 +709,12 @@
     const edits = buildEdits(diffTexts(oldText, newText));
     let caret = 0;
     let offset = 0;
+    let oldEnd = 0;
     edits.forEach((e) => {
       e.delLen = charLength(e.del);
       e.insChars = Array.from(e.ins);
+      e.from = oldEnd; // de cursor loopt over de oude tekst van 'from' tot het eind van het stuk dat weg moet
+      oldEnd = e.start + e.delLen;
       const target = e.start + offset + e.delLen;
       e.move = target - caret;
       caret = target - e.delLen + e.insChars.length;
@@ -694,9 +724,12 @@
   }
 
   function editCost(e, k) {
-    let ms = arrowTime(e.move);
-    if (k > 0) ms += settings.readPause * 1000;
-    ms += e.delLen * charDelay() * 0.6;
+    return arrowTime(e.move) + (k > 0 ? settings.readPause * 1000 : 0) + changeCost(e);
+  }
+
+  // Wissen en typen, zonder de cursor erheen te brengen.
+  function changeCost(e) {
+    let ms = e.delLen ? 350 + e.delLen * charDelay() * 0.6 : 0;
     if (e.insChars.length) ms += charDelay() + buildEstimate(e.insChars)[0];
     return ms;
   }
@@ -712,10 +745,12 @@
   // ---------------------------------------------------------------------------
 
   const MAX_BACK = 3;         // hooguit zoveel zinnen doortypen voordat hij teruggaat
-  const MIN_DRAFT_WORDS = 4;  // kortere zinnen herschrijft hij niet
+  const MIN_DRAFT_WORDS = 6;  // kortere zinnen herschrijft hij niet
+  const MIN_DRAFT_ERRORS = 3; // een kladzin heeft minstens 3 fouten (en hooguit 5)
+  const WALK_WORD_MS = 180;   // rustig teruglopen: zo lang per woord (bij gewoon tempo)
   const CLOSERS = new Set([')', ']', '"', '\'', '”', '’', '»']);
   // Hier kan het tellen van de cursorstappen misgaan: emoji, of iets dat Google Docs zelf vervangt (zoals (c) → ©).
-  const RISKY_RE = /[\p{M}‍️\u{10000}-\u{10FFFF}]|\((?:c|r|tm)\)|->|<-|=>|<=|>=|!=|--|\d\/\d|\.\.\.|[:;]-?[()DP]/iu;
+  const RISKY_RE = /[\p{M}\u200d\ufe0f\u{10000}-\u{10FFFF}]|\((?:c|r|tm)\)|->|<-|=>|<=|>=|!=|--|\d\/\d|\.\.\.|[:;]-?[()DP]/iu;
 
   const LANG_HINTS = {
     nl: new Set('de het een en van ik je niet dat zijn met voor op maar ook'.split(' ')),
@@ -734,6 +769,28 @@
       'vind vond denk dacht wordt werd zou zal mag mocht kwam kwamen').split(' ')),
     en: new Set('is was are were am have has had will would can could should must do did'.split(' ')),
   };
+
+  // Hier zet hij soms een komma te veel voor: "Ik denk, dat het klopt."
+  const CONJUNCTIONS = {
+    nl: new Set('dat die en maar omdat want als wat zodat terwijl toen of'.split(' ')),
+    en: new Set('that and which because but so when while'.split(' ')),
+  };
+
+  // Zinsdeel vooraan dat hij in de kladversie op een andere plek zet.
+  const FRONT_WORDS = {
+    nl: new Set(('gisteren vandaag morgen daarna toen eerst later nu soms vaak meestal altijd daarom dus toch ' +
+      'vervolgens uiteindelijk opeens ineens vroeger straks hier daar').split(' ')),
+    en: new Set('yesterday today tomorrow then later sometimes usually often now afterwards finally eventually recently'.split(' ')),
+  };
+  const FRONT_FIRST = {
+    nl: new Set('vorige volgende afgelopen elke iedere deze'.split(' ')),
+    en: new Set('last next every this'.split(' ')),
+  };
+  const FRONT_SECOND = {
+    nl: new Set('week maand jaar keer dag zomer winter ochtend middag avond nacht weekend'.split(' ')),
+    en: new Set('week month year time day summer winter morning afternoon evening night weekend'.split(' ')),
+  };
+  const SUBJECTS_NL = new Set('ik je jij we wij ze zij hij het u men jullie'.split(' '));
 
   // Woord in je tekst → het woord dat hij eerst in de kladversie typt.
   const SYNONYMS = {
@@ -802,11 +859,15 @@
     return sentences;
   }
 
-  const isWord = (t) => t != null && WORD_RE.test(t);
-  const isGap = (t) => t === ' ';
-  const endsClause = (t) => t == null || isGap(t) || SENTENCE_END.has(t) || CLAUSE_END.has(t);
-  // Een gewoon woord met kleine letters (geen naam, getal of afkorting).
-  const isPlainWord = (t) => isWord(t) && /^\p{Ll}+$/u.test(t);
+  // Een kladversie maakt hij van stukjes {s: tekst, orig: nog niet veranderd}.
+  // Elke fout pakt alleen woorden die nog niet veranderd zijn, zodat fouten elkaar niet opheffen.
+  const tok = (text, orig) => ({ s: text, orig: !!orig });
+  const isWord = (t) => t != null && WORD_RE.test(t.s);
+  const isGap = (t) => t != null && t.s === ' ';
+  const endsClause = (t) => t == null || isGap(t) || SENTENCE_END.has(t.s) || CLAUSE_END.has(t.s);
+  // Een gewoon woord met kleine letters (geen naam, getal of afkorting) dat nog niet veranderd is.
+  const isFresh = (t) => isWord(t) && t.orig && /^\p{Ll}+$/u.test(t.s);
+  const lower = (t) => (t ? t.s.toLowerCase() : '');
 
   function wordPositions(tokens) {
     const list = [];
@@ -818,16 +879,20 @@
     return list.length ? list[Math.floor(Math.random() * list.length)] : undefined;
   }
 
+  function capitalize(word) {
+    return word[0].toUpperCase() + word.slice(1);
+  }
+
   function matchCase(word, model) {
     if (model.length > 1 && model === model.toUpperCase()) return word.toUpperCase();
-    if (model[0] !== model[0].toLowerCase()) return word[0].toUpperCase() + word.slice(1);
+    if (model[0] !== model[0].toLowerCase()) return capitalize(word);
     return word;
   }
 
   // Een woord vergeten: "Ik ga morgen naar school." → "Ik ga naar school."
   function dropWord(tokens) {
     const k = pickRandom(wordPositions(tokens).slice(1)
-      .filter((p) => isPlainWord(tokens[p]) && isGap(tokens[p - 1]) && isGap(tokens[p + 1])));
+      .filter((p) => isFresh(tokens[p]) && isGap(tokens[p - 1]) && isGap(tokens[p + 1])));
     if (k === undefined) return null;
     const out = tokens.slice();
     out.splice(k - 1, 2);
@@ -836,32 +901,32 @@
 
   // Een woordje te veel: "Het was groter dan ik dacht." → "Het was echt groter dan ik dacht."
   function addFiller(tokens, lang) {
-    const k = pickRandom(wordPositions(tokens).filter((p) => FILLER_AFTER[lang].has(tokens[p].toLowerCase()) &&
-      isGap(tokens[p + 1]) && isPlainWord(tokens[p + 2]) && !FILLERS[lang].includes(tokens[p + 2])));
+    const k = pickRandom(wordPositions(tokens).filter((p) => FILLER_AFTER[lang].has(lower(tokens[p])) &&
+      isGap(tokens[p + 1]) && isFresh(tokens[p + 2]) && !FILLERS[lang].includes(tokens[p + 2].s)));
     if (k === undefined) return null;
     const out = tokens.slice();
-    out.splice(k + 2, 0, pickRandom(FILLERS[lang]), ' ');
+    out.splice(k + 2, 0, tok(pickRandom(FILLERS[lang])), tok(' '));
     return out;
   }
 
-  // Eerst een ander woord: "Het was echter te laat." → "Het was maar te laat."
+  // Eerst een ander woord: "Het was echter te laat." → "Het was toch te laat."
   function swapSynonym(tokens, lang) {
-    const k = pickRandom(wordPositions(tokens).filter((p) => SYNONYMS[lang].has(tokens[p].toLowerCase())));
+    const k = pickRandom(wordPositions(tokens).filter((p) => tokens[p].orig && SYNONYMS[lang].has(lower(tokens[p]))));
     if (k === undefined) return null;
     const out = tokens.slice();
-    out[k] = matchCase(SYNONYMS[lang].get(tokens[k].toLowerCase()), tokens[k]);
+    out[k] = tok(matchCase(SYNONYMS[lang].get(lower(tokens[k])), tokens[k].s));
     return out;
   }
 
-  // Twee woorden omgedraaid: "Ik ga morgen naar school." → "Ik ga naar morgen school."
+  // Twee woorden omgedraaid, midden in de zin: "Ik ga morgen naar school." → "Ik ga naar morgen school."
   function swapWords(tokens) {
     const k = pickRandom(wordPositions(tokens).slice(1).filter((p) =>
-      isPlainWord(tokens[p]) && isPlainWord(tokens[p + 2]) && tokens[p] !== tokens[p + 2] &&
-      isGap(tokens[p - 1]) && isGap(tokens[p + 1]) && endsClause(tokens[p + 3])));
+      isFresh(tokens[p]) && isFresh(tokens[p + 2]) && tokens[p].s !== tokens[p + 2].s &&
+      isGap(tokens[p - 1]) && isGap(tokens[p + 1]) && isGap(tokens[p + 3])));
     if (k === undefined) return null;
     const out = tokens.slice();
-    out[k] = tokens[k + 2];
-    out[k + 2] = tokens[k];
+    out[k] = tok(tokens[k + 2].s);
+    out[k + 2] = tok(tokens[k].s);
     return out;
   }
 
@@ -869,38 +934,132 @@
   function cutEnd(tokens) {
     let end = tokens.length;
     while (end > 0 && !isWord(tokens[end - 1]) && !isGap(tokens[end - 1])) end--;
-    if (!tokens.slice(end).some((t) => SENTENCE_END.has(t))) return null;
+    if (!tokens.slice(end).some((t) => SENTENCE_END.has(t.s))) return null;
     let from = end;
     const cut = 1 + Math.floor(Math.random() * 2);
-    for (let c = 0; c < cut && isPlainWord(tokens[from - 1]) && isGap(tokens[from - 2]); c++) from -= 2;
-    if (from === end || wordPositions(tokens.slice(0, from)).length < MIN_DRAFT_WORDS) return null;
+    for (let c = 0; c < cut && isFresh(tokens[from - 1]) && isGap(tokens[from - 2]); c++) from -= 2;
+    if (from === end || wordPositions(tokens.slice(0, from)).length < 4) return null;
     return tokens.slice(0, from).concat(tokens.slice(end));
   }
 
-  const DRAFT_CHANGES = [[3, dropWord], [2, addFiller], [3, swapSynonym], [1, swapWords], [2, cutEnd]];
+  // Een spelfout die blijft staan: twee letters omgedraaid of een letter ernaast ("school" → "shcool", "schiol").
+  // Altijd even lang, zodat het tellen klopt, ook als Google Docs de fout zelf verbetert.
+  function misspell(tokens, lang) {
+    const k = pickRandom(wordPositions(tokens).filter((p) => isFresh(tokens[p]) && tokens[p].s.length >= 4));
+    if (k === undefined) return null;
+    const letters = Array.from(tokens[k].s);
+    if (lang === 'nl' && /dt$/.test(tokens[k].s) && Math.random() < 0.5) {
+      letters.pop(); // dt-fout: "wordt" → "word"
+    } else if (Math.random() < 0.5) {
+      const spots = [];
+      for (let i = 1; i < letters.length - 1; i++) if (letters[i] !== letters[i + 1]) spots.push(i);
+      const i = pickRandom(spots);
+      if (i === undefined) return null;
+      [letters[i], letters[i + 1]] = [letters[i + 1], letters[i]];
+    } else {
+      const spots = [];
+      for (let i = 1; i < letters.length; i++) if (canTypo(letters[i])) spots.push(i);
+      const i = pickRandom(spots);
+      if (i === undefined) return null;
+      letters[i] = wrongCharFor(letters[i]);
+    }
+    const out = tokens.slice();
+    out[k] = tok(letters.join(''));
+    return out;
+  }
 
-  // Probeert de veranderingen in willekeurige volgorde (de gewone vaker eerst) tot er één lukt.
-  function changeOnce(tokens, lang) {
-    const options = DRAFT_CHANGES.slice();
+  // Een komma vergeten: "Het was druk, maar we zaten." → "Het was druk maar we zaten."
+  function dropComma(tokens) {
+    const k = pickRandom(tokens.map((t, p) => p).filter((p) =>
+      tokens[p].s === ',' && tokens[p].orig && isWord(tokens[p - 1]) && isGap(tokens[p + 1]) && tokens[p + 1].orig));
+    if (k === undefined) return null;
+    const out = tokens.slice();
+    out.splice(k, 2, tok(' ')); // ook de spatie erna telt als veranderd, zodat er hier geen komma terugkomt
+    return out;
+  }
+
+  // Een komma te veel: "Ik denk dat het klopt." → "Ik denk, dat het klopt."
+  function addComma(tokens, lang) {
+    const k = pickRandom(wordPositions(tokens).slice(2).filter((p) => CONJUNCTIONS[lang].has(lower(tokens[p])) &&
+      isGap(tokens[p - 1]) && tokens[p - 1].orig && isWord(tokens[p - 2])));
+    if (k === undefined) return null;
+    const out = tokens.slice();
+    out.splice(k - 1, 1, tok(','), tok(' '));
+    return out;
+  }
+
+  // Hoeveel woorden het zinsdeel vooraan is: "Daarna" (1), "Vorige week" (2), of 0 als het er niet is.
+  function frontLength(tokens, lang) {
+    if (!isWord(tokens[0]) || !tokens[0].orig) return 0;
+    if (FRONT_WORDS[lang].has(lower(tokens[0]))) return 1;
+    if (FRONT_FIRST[lang].has(lower(tokens[0])) && isGap(tokens[1]) && isWord(tokens[2]) && tokens[2].orig &&
+      FRONT_SECOND[lang].has(lower(tokens[2]))) return 2;
+    return 0;
+  }
+
+  // Zinsdeel op een andere plek: "Daarna mochten we zelf kijken." → "We mochten daarna zelf kijken."
+  // Engels: "Last summer we went to Rome." → "We went to Rome last summer."
+  function movePhrase(tokens, lang) {
+    const n = frontLength(tokens, lang);
+    if (!n) return null;
+    const phrase = tokens.slice(0, 2 * n - 1).map((t, i) => tok(i === 0 ? t.s.toLowerCase() : t.s));
+    if (lang === 'nl') {
+      const verb = tokens[2 * n];
+      const subject = tokens[2 * n + 2];
+      if (!isGap(tokens[2 * n - 1]) || !isFresh(verb) || !isGap(tokens[2 * n + 1]) || !subject || !subject.orig ||
+        !SUBJECTS_NL.has(lower(subject)) || !endsClause(tokens[2 * n + 3])) return null;
+      return [tok(capitalize(subject.s.toLowerCase())), tok(' '), tok(verb.s), tok(' ')]
+        .concat(phrase, tokens.slice(2 * n + 3));
+    }
+    let k = 2 * n - 1;
+    if (tokens[k] && tokens[k].s === ',') k++;
+    if (!isGap(tokens[k]) || !isWord(tokens[k + 1]) || !tokens[k + 1].orig) return null;
+    let end = tokens.length;
+    while (end > 0 && !isWord(tokens[end - 1]) && !isGap(tokens[end - 1])) end--;
+    if (end <= k + 2 || !tokens.slice(end).some((t) => SENTENCE_END.has(t.s))) return null;
+    const subject = tokens[k + 1].s === 'I' ? 'I' : capitalize(tokens[k + 1].s);
+    return [tok(subject)].concat(tokens.slice(k + 2, end), [tok(' ')], phrase, tokens.slice(end));
+  }
+
+  // [hoe vaak hij deze fout kiest, de fout, hooguit zoveel keer per zin]
+  const DRAFT_CHANGES = [
+    [4, misspell, 2], [3, dropWord, 1], [3, swapSynonym, 1], [3, movePhrase, 1], [2, addFiller, 1],
+    [2, dropComma, 1], [2, addComma, 1], [1, swapWords, 1], [1, cutEnd, 1],
+  ];
+
+  // Probeert de fouten in willekeurige volgorde (de gewone vaker eerst) tot er één lukt.
+  // 'used' telt per fout hoe vaak hij al in deze zin zit.
+  function changeOnce(tokens, lang, used) {
+    const options = DRAFT_CHANGES.filter(([, change, max]) => (used.get(change) || 0) < max);
     while (options.length) {
       let r = Math.random() * options.reduce((sum, [weight]) => sum + weight, 0);
       let k = 0;
       while (k < options.length - 1 && r >= options[k][0]) r -= options[k++][0];
       const [, change] = options.splice(k, 1)[0];
       const out = change(tokens, lang);
-      if (out) return out;
+      if (out) {
+        used.set(change, (used.get(change) || 0) + 1);
+        return out;
+      }
     }
     return null;
   }
 
-  // Kladversie van een zin, of null als de zin zich er niet voor leent.
+  // Kladversie van een zin met 3–5 fouten, of null als de zin daar te kort voor is.
   function makeDraft(sentence, lang) {
-    let tokens = tokenize(sentence);
+    let tokens = tokenize(sentence).map((t) => tok(t, true));
     if (wordPositions(tokens).length < MIN_DRAFT_WORDS) return null;
-    const changes = Math.random() < 0.3 ? 2 : 1;
-    for (let c = 0; c < changes; c++) tokens = changeOnce(tokens, lang) || tokens;
-    const draft = tokens.join('');
-    return draft === sentence ? null : draft;
+    const wanted = MIN_DRAFT_ERRORS + Math.floor(Math.random() * 3);
+    const used = new Map();
+    let made = 0;
+    while (made < wanted) {
+      const next = changeOnce(tokens, lang, used);
+      if (!next) break;
+      tokens = next;
+      made++;
+    }
+    const draft = tokens.map((t) => t.s).join('');
+    return made >= MIN_DRAFT_ERRORS && draft !== sentence ? draft : null;
   }
 
   // Kiest welke zinnen eerst als kladversie komen, en na hoeveel zinnen hij teruggaat.
@@ -921,15 +1080,16 @@
       const draft = makeDraft(final.join(''), lang);
       if (!draft) continue;
 
-      const fix = { start: s.start, end: s.end, gap: last.end - s.end, final, draft: Array.from(draft) };
+      // gapChars: wat hij na de kladzin nog typt voordat hij teruggaat (daar loopt de cursor overheen).
+      const fix = { start: s.start, end: s.end, gapChars: chars.slice(s.end, last.end), final, draft: Array.from(draft) };
+      fix.gap = fix.gapChars.length;
       fix.style = settings.rewriteStyle === 'mix' ? (Math.random() < 0.5 ? 'sentence' : 'diff') : settings.rewriteStyle;
       if (fix.style === 'diff') {
         const { edits, caret } = planEdits(draft, final.join(''));
         fix.edits = edits;
-        fix.back = final.length - caret + fix.gap;
+        fix.caret = caret;
       } else {
         fix.finalPace = makePace(final);
-        fix.back = fix.gap;
       }
       fixes.push(fix);
       k += back;
@@ -963,21 +1123,107 @@
     return typingPlan;
   }
 
-  function rewriteCost(fix) {
-    let ms = settings.readPause * 1000 + 300 + 450 + arrowTime(fix.back);
-    if (fix.style === 'diff') {
-      ms += arrowTime(fix.gap + fix.draft.length);
-      fix.edits.forEach((e, k) => { ms += (k ? 550 : 0) + editCost(e, 0); });
-    } else {
-      ms += arrowTime(fix.gap) + 350 + fix.draft.length * charDelay() * 0.6 + charDelay() + 550 +
-        buildEstimate(fix.final, fix.finalPace)[0];
-    }
-    return ms;
+  // Rustig teruglopen: de cursor gaat woord voor woord, met een korte pauze na elk woord.
+  function walkSteps(chars) {
+    return (chars.join('').match(/\S+\s*|\s+/g) || []).map(charLength);
   }
 
-  function buildPlanEstimate(plan) {
-    const costs = new Map(plan.fixes.map((fix) => [fix.streamAt, rewriteCost(fix)]));
-    return buildEstimate(plan.stream, plan.pace, (j) => costs.get(j) || 0);
+  function walkTime(chars) {
+    return walkSteps(chars).reduce((ms, n) => ms + arrowTime(n) + WALK_WORD_MS * tempoFactor, 0);
+  }
+
+  function rewriteCost(fix) {
+    const reading = settings.readPause * 1000 + 300;
+    return reading + withTempo(100 / settings.rewriteTempo, () => {
+      if (fix.style === 'diff') {
+        let ms = walkTime(fix.draft.concat(fix.gapChars)) + 450 * tempoFactor +
+          walkTime(fix.final.slice(fix.caret).concat(fix.gapChars));
+        fix.edits.forEach((e, k) => {
+          ms += (k ? 550 * tempoFactor : 0) + walkTime(fix.draft.slice(e.from, e.start + e.delLen)) + changeCost(e);
+        });
+        return ms;
+      }
+      return 2 * walkTime(fix.gapChars) + 350 + fix.draft.length * charDelay() * 0.6 + charDelay() + 550 +
+        450 * tempoFactor + buildEstimate(fix.final, fix.finalPace)[0];
+    });
+  }
+
+  // 'breaks': lange pauzes tussendoor (als je een lange tijd hebt ingevuld).
+  function buildPlanEstimate(plan, breaks) {
+    return withTempo(1, () => {
+      const extra = new Map(plan.fixes.map((fix) => [fix.streamAt, rewriteCost(fix)]));
+      if (breaks) breaks.forEach((ms, j) => extra.set(j, (extra.get(j) || 0) + ms));
+      return buildEstimate(plan.stream, plan.pace, (j) => extra.get(j) || 0);
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Klaar in een vaste tijd: zelf de snelheid uitrekenen
+  // ---------------------------------------------------------------------------
+
+  const MIN_AUTO_WPM = 20;  // langzamer typt hij niet; is er dan nog tijd over, dan neemt hij pauzes
+  const MAX_WPM = 300;
+  const BREAK_MS = 3 * 60000; // een lange pauze duurt gemiddeld zo lang
+
+  function targetTime() {
+    return ((Number(settings.targetHours) || 0) * 60 + (Number(settings.targetMinutes) || 0)) * 60000;
+  }
+
+  function formatTarget() {
+    const h = Number(settings.targetHours) || 0;
+    const m = Number(settings.targetMinutes) || 0;
+    return [h ? plural(h, 'uur', 'uur') : '', m ? plural(m, 'minuut', 'minuten') : ''].filter(Boolean).join(' en ');
+  }
+
+  // Welke snelheid (en hoeveel pauze tussendoor) hoort bij de ingevulde tijd?
+  // {wpm: null} = geen tijd ingevuld; {tooShort: true, minimum} = lukt niet, ook niet op de hoogste snelheid.
+  function solveTiming(plan) {
+    const target = targetTime();
+    if (!target) return { wpm: null, breaks: null };
+    const duration = (wpm) => withWpm(wpm, () => buildPlanEstimate(plan)[0]);
+    const fastest = duration(MAX_WPM);
+    if (fastest > target) return { wpm: MAX_WPM, tooShort: true, minimum: fastest, breaks: null };
+    const slowest = duration(MIN_AUTO_WPM);
+    if (slowest <= target) {
+      const breaks = planBreaks(plan.stream, target - slowest);
+      return { wpm: MIN_AUTO_WPM, breaks, breakTotal: breaks.size ? target - slowest : 0 };
+    }
+    let lo = MIN_AUTO_WPM;
+    let hi = MAX_WPM;
+    for (let k = 0; k < 20; k++) {
+      const mid = (lo + hi) / 2;
+      if (duration(mid) > target) lo = mid;
+      else hi = mid;
+    }
+    return { wpm: hi, breaks: null };
+  }
+
+  // Lange pauzes: liefst na een alinea, anders na een zin. Samen precies 'total' ms.
+  function planBreaks(stream, total) {
+    const breaks = new Map();
+    const paragraphs = [];
+    const sentences = [];
+    for (let j = 2; j < stream.length; j++) {
+      if (stream[j - 1] === '\n' && stream[j] !== '\n') paragraphs.push(j);
+      else if (stream[j - 1] === ' ' && SENTENCE_END.has(stream[j - 2])) sentences.push(j);
+    }
+    const shuffled = (list) => list.map((v) => [Math.random(), v]).sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+    const wanted = Math.max(1, Math.round(total / BREAK_MS));
+    let points = shuffled(paragraphs).slice(0, wanted);
+    if (points.length < wanted) points = points.concat(shuffled(sentences).slice(0, wanted - points.length));
+    if (!points.length) return breaks;
+    const weights = points.map(() => 0.6 + Math.random() * 0.8);
+    const sum = weights.reduce((a, b) => a + b, 0);
+    points.forEach((j, k) => breaks.set(j, (total * weights[k]) / sum));
+    return breaks;
+  }
+
+  async function takeBreak(ms) {
+    const end = activeTime() + ms;
+    while (activeTime() < end) {
+      setStatus('Even pauze… nog ' + formatDuration(end - activeTime()) + '. Daarna typt hij vanzelf verder.');
+      await wait(Math.min(1000, end - activeTime()));
+    }
   }
 
   function shorten(text) {
@@ -999,6 +1245,7 @@
     method: null,
     plan: null,         // Auto typer: wat hij typt en waar hij teruggaat
     fixIndex: 0,        // Auto typer: de volgende zin die hij herschrijft
+    breaks: null,       // Auto typer: lange pauzes tussendoor (bij een ingevulde tijd)
     edits: [],          // Verbeter-typer: de wijzigingen
     done: 0,
     total: 0,
@@ -1059,6 +1306,7 @@
       method: settings.method === 'auto' ? null : settings.method,
       plan: null,
       fixIndex: 0,
+      breaks: null,
       edits: [],
       done: 0,
       total: 0,
@@ -1092,6 +1340,7 @@
   }
 
   function endRun() {
+    paceWpm = null;
     run.active = false;
     run.paused = false;
     run.countingDown = false;
@@ -1112,6 +1361,11 @@
   // Eén wijziging: cursor erheen, het oude stuk wissen, het nieuwe stuk typen.
   async function applyEdit(e) {
     await moveCaret(e.move);
+    await changeAt(e);
+  }
+
+  // Het oude stuk wissen en het nieuwe typen (de cursor staat al achter het oude stuk).
+  async function changeAt(e) {
     if (e.delLen) {
       await wait(200 + Math.random() * 300);
       await deleteChars(e.delLen);
@@ -1122,24 +1376,43 @@
     }
   }
 
-  // Terug naar de kladzin, hem verbeteren, en weer verder waar hij was.
+  // Cursor rustig woord voor woord over 'chars' heen (de tekst tussen de cursor en waar hij heen moet).
+  async function walkCaret(chars, direction) {
+    const steps = walkSteps(chars);
+    if (direction < 0) steps.reverse();
+    for (const n of steps) {
+      await moveCaret(direction * n);
+      await wait(spread(WALK_WORD_MS) * tempoFactor);
+    }
+  }
+
+  // Rustig terug naar de kladzin, hem verbeteren, en weer verder waar hij was.
   async function rewriteSentence(fix) {
     await wait(spread(settings.readPause * 1000) + 300); // even teruglezen
-    if (fix.style === 'diff') {
-      await moveCaret(-(fix.gap + fix.draft.length));
-      for (let k = 0; k < fix.edits.length; k++) {
-        if (k > 0) await wait(300 + Math.random() * 500);
-        await applyEdit(fix.edits[k]);
+    tempoFactor = 100 / settings.rewriteTempo;
+    try {
+      if (fix.style === 'diff') {
+        await walkCaret(fix.draft.concat(fix.gapChars), -1);
+        for (let k = 0; k < fix.edits.length; k++) {
+          const e = fix.edits[k];
+          if (k > 0) await wait((300 + Math.random() * 500) * tempoFactor);
+          await walkCaret(fix.draft.slice(e.from, e.start + e.delLen), 1);
+          await changeAt(e);
+        }
+        await wait((250 + Math.random() * 400) * tempoFactor);
+        await walkCaret(fix.final.slice(fix.caret).concat(fix.gapChars), 1);
+      } else {
+        await walkCaret(fix.gapChars, -1);
+        await wait(200 + Math.random() * 300);
+        await deleteChars(fix.draft.length);
+        await wait(charDelay() * jitter() + 300 + Math.random() * 500);
+        await typeSequence(fix.final, fix.finalPace);
+        await wait((250 + Math.random() * 400) * tempoFactor);
+        await walkCaret(fix.gapChars, 1);
       }
-    } else {
-      await moveCaret(-fix.gap);
-      await wait(200 + Math.random() * 300);
-      await deleteChars(fix.draft.length);
-      await wait(charDelay() * jitter() + 300 + Math.random() * 500);
-      await typeSequence(fix.final, fix.finalPace);
+    } finally {
+      tempoFactor = 1;
     }
-    await wait(250 + Math.random() * 400);
-    await moveCaret(fix.back);
   }
 
   async function startTyping() {
@@ -1151,8 +1424,16 @@
     }
 
     const plan = currentTypingPlan(text);
+    const timing = solveTiming(plan);
+    if (timing.tooShort) {
+      setStatus('Dat lukt niet in ' + formatTarget() + ': ook op de hoogste snelheid duurt het minstens ' +
+        formatDuration(timing.minimum) + '. Vul een langere tijd in.', 'warn');
+      return;
+    }
     typingPlan = null; // de volgende keer weer andere zinnen
-    beginRun('type', { plan: plan, total: plan.stream.length, estimate: buildPlanEstimate(plan) });
+    paceWpm = timing.wpm;
+    beginRun('type', { plan: plan, breaks: timing.breaks, total: plan.stream.length,
+      estimate: buildPlanEstimate(plan, timing.breaks) });
 
     try {
       await countdown('Tik nu in je document waar de tekst moet komen.');
@@ -1162,11 +1443,17 @@
         updateProgress();
       }, async (done) => {
         const fix = plan.fixes[run.fixIndex];
-        if (!fix || fix.streamAt !== done) return;
-        setStatus('Zin verbeteren…');
-        await rewriteSentence(fix);
-        run.fixIndex++;
-        setStatus('Bezig met typen…');
+        if (fix && fix.streamAt === done) {
+          setStatus('Zin verbeteren…');
+          await rewriteSentence(fix);
+          run.fixIndex++;
+          setStatus('Bezig met typen…');
+        }
+        const pause = timing.breaks && timing.breaks.get(done);
+        if (pause) {
+          await takeBreak(pause);
+          setStatus('Bezig met typen…');
+        }
       });
       const words = countWords(text);
       const rewritten = plan.fixes.length ? ', ' + plural(plan.fixes.length, 'zin', 'zinnen') + ' herschreven' : '';
@@ -1417,6 +1704,20 @@
     .method button.btn { height: 38px; padding: 0 14px; }
     .row > select { width: 100%; margin-top: 4px; }
     .toggles { display: grid; gap: 6px; margin: 0 0 12px; }
+    .meta.warn-text { color: #b45309; font-weight: 600; }
+    .duration {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 10px;
+      border: 1px solid var(--line); border-radius: 10px; font-size: 13.5px;
+    }
+    .duration .switch-title { margin-right: 4px; }
+    .duration input {
+      width: 58px; height: 34px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line);
+      background: var(--soft); color: var(--text); font-size: 15px; text-align: center;
+    }
+    .duration input:focus { outline: 2px solid var(--accent); outline-offset: -1px; background: #fff; }
+    .duration input:disabled { opacity: .5; }
+    .duration .hint { flex-basis: 100%; }
+    input[type=range]:disabled { opacity: .5; }
     .switch {
       position: relative; display: flex; align-items: center; gap: 10px; padding: 8px 10px; cursor: pointer;
       border: 1px solid var(--line); border-radius: 10px; user-select: none; -webkit-user-select: none;
@@ -1487,7 +1788,7 @@
     ['Snel', { wpm: 75, variation: 40, sentencePause: 0.3, paragraphPause: 0.8, typoRate: 1.5, burstPause: 0.6, readPause: 1 }],
   ];
 
-  const sliderRefresh = {};
+  const sliderRows = {};
   const profileButtons = [];
 
   function sliderRow(label, key, min, max, step, format, hint) {
@@ -1514,9 +1815,13 @@
       onSettingsChanged();
     });
     show();
-    sliderRefresh[key] = () => {
-      input.value = String(settings[key]);
-      show();
+    sliderRows[key] = {
+      input,
+      val,
+      refresh: () => {
+        input.value = String(settings[key]);
+        show();
+      },
     };
 
     row.append(top, input);
@@ -1560,6 +1865,41 @@
     return row;
   }
 
+  // "Klaar in [uur] [min]"; geeft [rij, invoervakjes] terug.
+  function durationRow() {
+    const box = el('div', 'duration');
+    const fields = [];
+    box.append(el('span', 'switch-title', 'Klaar in'));
+    [['targetHours', 'uur', 'Uren', 99], ['targetMinutes', 'min', 'Minuten', 999]].forEach(([key, unit, name, max]) => {
+      const input = el('input');
+      input.type = 'number';
+      input.min = '0';
+      input.max = String(max);
+      input.step = '1';
+      input.inputMode = 'numeric';
+      input.placeholder = '0';
+      input.value = settings[key] ? String(settings[key]) : '';
+      input.setAttribute('aria-label', name);
+      input.addEventListener('input', () => {
+        const v = Math.floor(Number(input.value));
+        settings[key] = Number.isFinite(v) && v > 0 ? Math.min(v, max) : 0;
+        onSettingsChanged();
+      });
+      box.append(input, el('span', null, unit));
+      fields.push(input);
+    });
+    box.append(el('span', 'hint', 'Leeg laten = je gewone snelheid. Vul je een tijd in, dan rekent hij de snelheid zelf uit.'));
+    return [box, fields];
+  }
+
+  // Met een ingevulde tijd staat het schuifje Snelheid op automatisch.
+  function showAutoWpm(auto, wpm) {
+    const row = sliderRows.wpm;
+    row.input.disabled = auto;
+    if (!auto) row.refresh();
+    else row.val.textContent = wpm ? 'automatisch: ' + Math.round(wpm) + ' wpm' : 'automatisch';
+  }
+
   function groupTitle(title, hint) {
     const head = el('div', 'group', title);
     if (hint) head.append(el('div', 'hint', hint));
@@ -1576,7 +1916,7 @@
       button.type = 'button';
       button.addEventListener('click', () => {
         Object.assign(settings, values);
-        Object.keys(values).forEach((key) => { if (sliderRefresh[key]) sliderRefresh[key](); });
+        Object.keys(values).forEach((key) => { if (sliderRows[key]) sliderRows[key].refresh(); });
         onSettingsChanged();
       });
       profileButtons.push([button, values]);
@@ -1651,10 +1991,11 @@
     const typeMeta = el('div', 'meta');
     const toggles = el('div', 'toggles');
     const [rewriteRow, rewriteToggle] = toggleRow('Zinnen herschrijven', 'rewriteOn',
-      'Gaat soms 1–3 zinnen terug en verbetert een zin.');
+      'Gaat soms 1–3 zinnen terug en verbetert rustig een zin met 3–5 fouten.');
     const [burstRow, burstToggle] = toggleRow('Snel typen in stukjes', 'burstOn',
       'Een paar woorden snel, even nadenken, dan weer verder.');
-    toggles.append(rewriteRow, burstRow);
+    const [durationBox, durationFields] = durationRow();
+    toggles.append(rewriteRow, burstRow, durationBox);
     typeSection.append(textarea, typeMeta, toggles);
 
     // Verbeter-typer
@@ -1711,8 +2052,12 @@
 
       groupTitle('Zinnen herschrijven', 'Zet dit aan op het tabblad Auto typer.'),
       sliderRow('Hoe vaak', 'rewriteRate', 5, 50, 5, (v) => 'ongeveer 1 op de ' + Math.round(100 / v) + ' zinnen',
-        'Hij typt eerst een kladversie van de zin (een woord vergeten, een ander woord, woorden omgedraaid), ' +
-        'typt 1–3 zinnen verder en gaat dan terug om hem te verbeteren. Aan het eind staat je tekst er precies zo als je hem hebt geplakt.'),
+        'Hij typt eerst een kladversie van de zin met 3–5 fouten (spelfouten, een woord vergeten of te veel, een ander woord, ' +
+        'een komma, een zinsdeel op een andere plek), typt 1–3 zinnen verder en gaat dan rustig terug om hem te verbeteren. ' +
+        'Zinnen van minder dan 6 woorden slaat hij over. Aan het eind staat je tekst er precies zo als je hem hebt geplakt.'),
+      sliderRow('Tempo bij verbeteren', 'rewriteTempo', 20, 100, 10,
+        (v) => (v === 100 ? 'gewone snelheid' : v + '% van je snelheid'),
+        'Hoe rustig hij typt en wist als hij een zin verbetert. De cursor loopt dan ook woord voor woord terug, en weer verder.'),
       selectRow('Hoe verbeteren', 'rewriteStyle',
         [['mix', 'Afwisselend'], ['sentence', 'Hele zin wissen en opnieuw typen'], ['diff', 'Alleen het verschil aanpassen']]),
 
@@ -1768,7 +2113,7 @@
 
     Object.assign(ui, {
       host, panel, header, typeTab, improveTab, typeSection, improveSection, textarea, typeMeta,
-      rewriteToggle, burstToggle, oldTextarea, newTextarea, preview, improveNote, improveMeta,
+      rewriteToggle, burstToggle, durationFields, oldTextarea, newTextarea, preview, improveNote, improveMeta,
       startBtn, pauseBtn, stopBtn, testBtn, select, bar, stats, status, bubble,
     });
 
@@ -1823,7 +2168,7 @@
     saveSettings();
     markProfile();
     if (run.active && run.mode === 'type') {
-      run.estimate = buildPlanEstimate(run.plan);
+      run.estimate = buildPlanEstimate(run.plan, run.breaks);
       updateProgress();
     } else if (run.active && run.mode === 'improve') {
       run.estimate = buildEditEstimate(run.edits);
@@ -1836,18 +2181,34 @@
     clearTimeout(metaTimer);
     metaTimer = setTimeout(() => {
       if (settings.tab === 'improve') {
+        showAutoWpm(false); // de ingevulde tijd geldt alleen voor de Auto typer
         updateImproveMeta();
         return;
       }
       const text = ui.textarea.value;
       if (!text.trim()) {
+        showAutoWpm(targetTime() > 0);
+        ui.typeMeta.classList.remove('warn-text');
         ui.typeMeta.textContent = 'Nog geen tekst.';
         return;
       }
       const plan = currentTypingPlan(text);
+      const timing = solveTiming(plan);
+      showAutoWpm(timing.wpm != null, timing.wpm);
       const rewrites = plan.fixes.length ? ' · ' + plural(plan.fixes.length, 'zin', 'zinnen') + ' herschrijven' : '';
+      let time;
+      if (timing.tooShort) {
+        time = ' · Lukt niet in ' + formatTarget() + ': het duurt minstens ' + formatDuration(timing.minimum) + '.';
+      } else {
+        time = ' · duurt ongeveer ' + formatDuration(withWpm(timing.wpm, () => buildPlanEstimate(plan, timing.breaks)[0]));
+        if (timing.wpm) {
+          time += ' (' + Math.round(timing.wpm) + ' wpm' +
+            (timing.breakTotal ? ', met ' + formatDuration(timing.breakTotal) + ' pauze tussendoor' : '') + ')';
+        }
+      }
+      ui.typeMeta.classList.toggle('warn-text', !!timing.tooShort);
       ui.typeMeta.textContent = plural(countWords(text), 'woord', 'woorden') + ' · ' +
-        plural(toChars(text).length, 'teken', 'tekens') + rewrites + ' · duurt ongeveer ' + formatDuration(buildPlanEstimate(plan)[0]);
+        plural(toChars(text).length, 'teken', 'tekens') + rewrites + time;
     }, 150);
   }
 
@@ -1925,6 +2286,7 @@
     ui.improveTab.disabled = run.active;
     ui.rewriteToggle.disabled = run.active;
     ui.burstToggle.disabled = run.active;
+    ui.durationFields.forEach((f) => { f.disabled = run.active; });
     ui.pauseBtn.disabled = !run.active || run.mode === 'test' || (!run.startedAt && !run.countingDown);
     ui.stopBtn.disabled = !run.active || run.mode === 'test';
     ui.pauseBtn.textContent = run.paused ? '▶ Verder' : '⏸ Pauze';
